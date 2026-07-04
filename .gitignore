@@ -1,0 +1,43 @@
+# Python 
+__pycache__/
+*.pyc
+*.pyo
+.mypy_cache/
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+
+# Virtual environments 
+venv/
+.venv/
+env/
+
+# Data 
+data/chunks/
+data/indexes/
+
+# Cloned repos 
+repos/
+
+# Environment & Config   
+.env
+repos.json
+feedback.jsonl
+
+# Scratch & Automation Scripts 
+rewrite_*.py
+fix_git_history.py
+
+# Node / frontend      
+frontend/node_modules/
+frontend/dist/
+
+# Misc 
+.DS_Store
+*.log
+*.json.bak
+
+# Keep data directory structure (empty) 
+!data/chunks/.gitkeep
+!data/indexes/.gitkeep
