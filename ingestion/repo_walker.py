@@ -90,3 +90,4 @@ def relative_path(file_path: Path, repo_root: Path) -> str:
         return file_path.relative_to(repo_root).as_posix()
     except ValueError:
         return file_path.as_posix()
+
