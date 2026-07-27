@@ -207,3 +207,4 @@ class FaissStore:
         print(f"  ✓ Removed {removed_count} vectors for '{repo_name}' from {index_path.name} → {len(keep_indices)} remaining")
         return removed_count
 
+
