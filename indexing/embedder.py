@@ -111,3 +111,4 @@ class Embedder:
     @property
     def dim(self) -> int:
         return EMBEDDING_DIM
+
