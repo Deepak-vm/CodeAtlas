@@ -144,3 +144,4 @@ if __name__ == "__main__":
             f"  [{i}] {c['repo']}/{c['file_path']}:{c['start_line']}"
             + (f"  [{c['symbol_name']}]" if c.get("symbol_name") else "")
         )
+
