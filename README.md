@@ -281,3 +281,4 @@ python -m eval.run_eval --verbose
 - Evaluation set contains 20 questions benchmarked against 3 target repositories — results demonstrate the architecture, not large-scale production performance.
 - Incremental re-indexing on commit push (webhook-triggered) is designed but not yet implemented; current updates require a manual per-repo re-ingestion step.
 - Groq's free-tier token-per-minute cap (12k TPM) limits continuous eval throughput; the eval runner adds a 5-second inter-query pause to avoid 429 errors.
+
