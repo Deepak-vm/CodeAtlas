@@ -620,12 +620,17 @@ export default function App() {
               Backend Not Reachable
             </h3>
             <p style={{ color: 'var(--text-dim)', fontSize: 13, margin: '0 0 20px', maxWidth: 400, marginLeft: 'auto', marginRight: 'auto' }}>
-              Could not connect to the API server on <code style={{ fontFamily: 'var(--mono)', background: 'var(--surface-2)', padding: '1px 5px', borderRadius: 3 }}>localhost:8000</code>.
-              Make sure the backend is running:
+              Could not connect to the API server on{' '}
+              <code style={{ fontFamily: 'var(--mono)', background: 'var(--surface-2)', padding: '1px 5px', borderRadius: 3 }}>
+                {import.meta.env.VITE_API_BASE_URL || 'localhost:8000'}
+              </code>.
+              {import.meta.env.VITE_API_BASE_URL ? ' The backend may be sleeping (free tier cold start). Please wait 30s and retry.' : ' Make sure the backend is running:'}
             </p>
+            {!import.meta.env.VITE_API_BASE_URL && (
             <pre style={{ fontFamily: 'var(--mono)', fontSize: 12, background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 8, padding: '10px 16px', display: 'inline-block', marginBottom: 20, color: 'var(--accent)' }}>
               uvicorn api.main:app --reload --port 8000
             </pre>
+            )}
             <br />
             <button
               onClick={loadSystemInfo}
