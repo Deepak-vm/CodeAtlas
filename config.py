@@ -141,9 +141,10 @@ API_HOST = "0.0.0.0"
 API_PORT = 8000
 
 # Add your Vercel frontend URL here after deploying (or set via FRONTEND_URL env var)
-_frontend_url = os.getenv("FRONTEND_URL", "")
+_frontend_url = os.getenv("FRONTEND_URL", "").rstrip("/")   # strip trailing slash — must match browser Origin exactly
 API_CORS_ORIGINS = [
     "http://localhost:3000",
     "http://localhost:5173",
-    *([_frontend_url] if _frontend_url else []),   # injected at runtime from env
+    "https://code-atlas-snowy.vercel.app",               # hardcoded Vercel URL (guaranteed)
+    *([_frontend_url] if _frontend_url else []),          # also allow FRONTEND_URL env var if set
 ]
