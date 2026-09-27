@@ -115,25 +115,60 @@ def _get_last_sync_time() -> str:
 def _ingest_and_index_single_repo(repo_name: str) -> None:
     """Ingest only the newly added repository and update vector indexes."""
     print(f"[api] Ingesting single repository: {repo_name}...")
-    res_ingest = subprocess.run(
-        [sys.executable, "-m", "ingestion.run_ingestion", "--only-repo", repo_name],
-        capture_output=True, text=True
-    )
-    if res_ingest.returncode != 0:
-        print(f"[api] Ingestion error: {res_ingest.stderr}")
-        raise RuntimeError(f"Ingestion failed: {res_ingest.stderr}")
+
+    # The ingestion subprocess reads repos.json from disk.
+    # Since repos are now in Supabase, we write a temporary repos.json
+    # for the subprocess, then remove it after.
+    import tempfile, json as _json
+    try:
+        repo_entries = db.get_all_repos()
+    except Exception as e:
+        raise RuntimeError(f"Could not fetch repos from Supabase: {e}")
+
+    # Write temp repos.json the ingestion script can read
+    tmp_repos_path = config.DATA_DIR / "_tmp_repos.json"
+    try:
+        with open(tmp_repos_path, "w") as f:
+            _json.dump(repo_entries, f)
+    except Exception as e:
+        raise RuntimeError(f"Could not write temp repos file: {e}")
+
+    try:
+        res_ingest = subprocess.run(
+            [
+                sys.executable, "-m", "ingestion.run_ingestion",
+                "--repos-config", str(tmp_repos_path),
+                "--only-repo", repo_name,
+            ],
+            capture_output=True, text=True
+        )
+        if res_ingest.returncode != 0:
+            # Capture BOTH stdout and stderr — rich console output goes to stdout
+            error_detail = (res_ingest.stderr or "") + (res_ingest.stdout or "")
+            print(f"[api] Ingestion stdout: {res_ingest.stdout}")
+            print(f"[api] Ingestion stderr: {res_ingest.stderr}")
+            raise RuntimeError(f"Ingestion failed (exit {res_ingest.returncode}): {error_detail[:500]}")
+        print(f"[api] Ingestion stdout: {res_ingest.stdout[-500:]}")
+    finally:
+        tmp_repos_path.unlink(missing_ok=True)
 
     print("[api] Updating vector indexes...")
-    res_index = subprocess.run([sys.executable, "-m", "indexing.build_indexes"], capture_output=True, text=True)
+    res_index = subprocess.run(
+        [sys.executable, "-m", "indexing.build_indexes"],
+        capture_output=True, text=True
+    )
     if res_index.returncode != 0:
-        print(f"[api] Indexing error: {res_index.stderr}")
-        raise RuntimeError(f"Indexing failed: {res_index.stderr}")
+        error_detail = (res_index.stderr or "") + (res_index.stdout or "")
+        print(f"[api] Indexing stdout: {res_index.stdout}")
+        print(f"[api] Indexing stderr: {res_index.stderr}")
+        raise RuntimeError(f"Indexing failed (exit {res_index.returncode}): {error_detail[:500]}")
 
     _code_faiss.cache_clear()
     _commit_faiss.cache_clear()
     _readme_faiss.cache_clear()
     _code_bm25.cache_clear()
-    print(f"[api] Ingestion and indexing complete for {repo_name}!")
+    print(f"[api] ✓ Ingestion and indexing complete for {repo_name}!")
+
 
 
 def _delete_repo_and_reindex(repo_name: str) -> None:
