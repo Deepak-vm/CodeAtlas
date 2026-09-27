@@ -22,7 +22,12 @@ services:
       - key: LANGCHAIN_PROJECT
         value: "Knowledge-Base-Agent"
       - key: DB_URL
-        sync: false               # Supabase PostgreSQL connection string
+        sync: false               # kept for reference — not used (TCP blocked on free tier)
+      - key: SUPABASE_URL
+        sync: false               # https://your-project.supabase.co
+      - key: SUPABASE_SERVICE_KEY
+        sync: false               # service_role secret key from Supabase → Settings → API
+
 
     disk:
       name: kb-persistent-data

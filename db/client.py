@@ -1,62 +1,54 @@
 """
 db/client.py
 
-Supabase PostgreSQL client using psycopg2 (direct connection, no extra SDK needed).
+Supabase client using the official supabase-py SDK.
+Communicates via HTTPS REST API (port 443) — works on Render free tier.
 
-Tables managed here:
-  - repos          : repo metadata (name, url, last_synced, chunk_count)
-  - query_history  : every query + answer stored globally (shared across all users)
-  - feedback       : thumbs up/down ratings
+Direct psycopg2 / port 5432 is NOT used here because Render free tier
+blocks outbound TCP to that port.
 
-Connection string comes from DB_URL env var.
+Required env vars:
+  SUPABASE_URL          https://your-project.supabase.co
+  SUPABASE_SERVICE_KEY  service_role secret key (from Supabase → Settings → API)
+
+Tables (create once in Supabase SQL editor — see bootstrap_schema_sql below):
+  repos           — repo metadata
+  query_history   — every query+answer stored globally
+  feedback        — thumbs up/down ratings
 """
 
 from __future__ import annotations
 
 import json
 import os
-from contextlib import contextmanager
-from datetime import datetime, timezone
 from typing import Any
 
-import psycopg2
-import psycopg2.extras
-from psycopg2.pool import ThreadedConnectionPool
+from supabase import create_client, Client
 
-# ── Connection pool (1-5 connections, Supabase free tier is generous) ─────────
-_pool: ThreadedConnectionPool | None = None
+# ── Lazy singleton ─────────────────────────────────────────────────────────────
+_client: Client | None = None
 
 
-def _get_pool() -> ThreadedConnectionPool:
-    global _pool
-    if _pool is None:
-        db_url = os.getenv("DB_URL", "")
-        if not db_url:
+def get_client() -> Client:
+    global _client
+    if _client is None:
+        url = os.getenv("SUPABASE_URL", "")
+        key = os.getenv("SUPABASE_SERVICE_KEY", "")
+        if not url or not key:
             raise RuntimeError(
-                "DB_URL env var is not set. Add it to .env or Render dashboard."
+                "SUPABASE_URL and SUPABASE_SERVICE_KEY env vars must be set. "
+                "Get them from Supabase dashboard → Project Settings → API."
             )
-        _pool = ThreadedConnectionPool(1, 5, dsn=db_url, sslmode="require")
-    return _pool
+        _client = create_client(url, key)
+    return _client
 
 
-@contextmanager
-def get_conn():
-    """Context manager: borrow a connection from pool, return after use."""
-    pool = _get_pool()
-    conn = pool.getconn()
-    try:
-        yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        pool.putconn(conn)
+# ── Schema SQL (run ONCE in Supabase SQL editor) ───────────────────────────────
+# Go to: supabase.com → your project → SQL Editor → paste and run this
 
+BOOTSTRAP_SCHEMA_SQL = """
+-- Run this once in Supabase SQL Editor to create the tables
 
-# ── Schema bootstrap (called once at API startup) ─────────────────────────────
-
-SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS repos (
     id           SERIAL PRIMARY KEY,
     name         TEXT NOT NULL UNIQUE,
@@ -95,62 +87,51 @@ CREATE INDEX IF NOT EXISTS idx_feedback_created ON feedback (created_at DESC);
 
 
 def bootstrap_schema() -> None:
-    """Create tables if they don't exist. Safe to run on every startup."""
+    """Verify the connection is alive at startup. Tables must be pre-created via SQL editor."""
     try:
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(SCHEMA_SQL)
-        print("[db] ✓ Supabase schema bootstrapped")
+        sb = get_client()
+        # simple ping — just list repos (empty list is fine)
+        sb.table("repos").select("id").limit(1).execute()
+        print("[db] ✓ Supabase connection OK (HTTPS REST API)")
     except Exception as e:
-        print(f"[db] ⚠ Schema bootstrap failed: {e} — app will continue without DB")
+        print(f"[db] ⚠ Supabase connection failed: {e}")
+        print("[db]   → Make sure SUPABASE_URL and SUPABASE_SERVICE_KEY are set")
+        print("[db]   → Tables must exist — run BOOTSTRAP_SCHEMA_SQL in Supabase SQL editor")
 
 
 # ── Repos CRUD ─────────────────────────────────────────────────────────────────
 
 def get_all_repos() -> list[dict]:
-    with get_conn() as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute("SELECT name, url, last_synced, chunk_count FROM repos ORDER BY created_at")
-            return [dict(r) for r in cur.fetchall()]
+    sb = get_client()
+    res = sb.table("repos").select("name,url,last_synced,chunk_count").order("created_at").execute()
+    return res.data or []
 
 
 def repo_exists(name: str) -> bool:
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT 1 FROM repos WHERE LOWER(name) = LOWER(%s)", (name,))
-            return cur.fetchone() is not None
+    sb = get_client()
+    res = sb.table("repos").select("id").ilike("name", name).limit(1).execute()
+    return len(res.data) > 0
 
 
 def upsert_repo(name: str, url: str, last_synced: str = "", chunk_count: int = 0) -> None:
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO repos (name, url, last_synced, chunk_count)
-                VALUES (%s, %s, %s, %s)
-                ON CONFLICT (name) DO UPDATE
-                SET url = EXCLUDED.url,
-                    last_synced = EXCLUDED.last_synced,
-                    chunk_count = EXCLUDED.chunk_count
-                """,
-                (name, url, last_synced, chunk_count),
-            )
+    sb = get_client()
+    sb.table("repos").upsert(
+        {"name": name, "url": url, "last_synced": last_synced, "chunk_count": chunk_count},
+        on_conflict="name",
+    ).execute()
 
 
 def update_repo_sync(name: str, last_synced: str, chunk_count: int = 0) -> None:
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "UPDATE repos SET last_synced = %s, chunk_count = %s WHERE LOWER(name) = LOWER(%s)",
-                (last_synced, chunk_count, name),
-            )
+    sb = get_client()
+    sb.table("repos").update(
+        {"last_synced": last_synced, "chunk_count": chunk_count}
+    ).ilike("name", name).execute()
 
 
 def delete_repo(name: str) -> bool:
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("DELETE FROM repos WHERE LOWER(name) = LOWER(%s)", (name,))
-            return cur.rowcount > 0
+    sb = get_client()
+    res = sb.table("repos").delete().ilike("name", name).execute()
+    return len(res.data) > 0
 
 
 # ── Query History CRUD ─────────────────────────────────────────────────────────
@@ -166,73 +147,48 @@ def save_query(
     ambiguity_detail: str = "",
 ) -> int:
     """Insert a query record and return its ID."""
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO query_history
-                    (query, answer, routed_repos, routed_types, citations, latency_ms, ambiguity_flag, ambiguity_detail)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                RETURNING id
-                """,
-                (
-                    query,
-                    answer,
-                    json.dumps(routed_repos),
-                    json.dumps(routed_types),
-                    json.dumps(citations),
-                    latency_ms,
-                    ambiguity_flag,
-                    ambiguity_detail,
-                ),
-            )
-            return cur.fetchone()[0]
+    sb = get_client()
+    res = sb.table("query_history").insert({
+        "query": query,
+        "answer": answer,
+        "routed_repos": routed_repos,
+        "routed_types": routed_types,
+        "citations": citations,
+        "latency_ms": latency_ms,
+        "ambiguity_flag": ambiguity_flag,
+        "ambiguity_detail": ambiguity_detail,
+    }).execute()
+    return res.data[0]["id"] if res.data else -1
 
 
 def get_history(limit: int = 100) -> list[dict]:
     """Return most recent queries, newest first."""
-    with get_conn() as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(
-                """
-                SELECT id, query, answer, routed_repos, routed_types,
-                       citations, latency_ms, ambiguity_flag, ambiguity_detail,
-                       saved, created_at
-                FROM query_history
-                ORDER BY created_at DESC
-                LIMIT %s
-                """,
-                (limit,),
-            )
-            rows = cur.fetchall()
-            result = []
-            for r in rows:
-                row = dict(r)
-                # created_at → ISO string
-                if isinstance(row["created_at"], datetime):
-                    row["created_at"] = row["created_at"].isoformat()
-                result.append(row)
-            return result
+    sb = get_client()
+    res = (
+        sb.table("query_history")
+        .select("id,query,answer,routed_repos,routed_types,citations,latency_ms,ambiguity_flag,ambiguity_detail,saved,created_at")
+        .order("created_at", desc=True)
+        .limit(limit)
+        .execute()
+    )
+    return res.data or []
 
 
 def toggle_history_saved(history_id: int, saved: bool) -> None:
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("UPDATE query_history SET saved = %s WHERE id = %s", (saved, history_id))
+    sb = get_client()
+    sb.table("query_history").update({"saved": saved}).eq("id", history_id).execute()
 
 
 def delete_history_item(history_id: int) -> None:
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("DELETE FROM query_history WHERE id = %s", (history_id,))
+    sb = get_client()
+    sb.table("query_history").delete().eq("id", history_id).execute()
 
 
 def bulk_delete_history(ids: list[int]) -> None:
     if not ids:
         return
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("DELETE FROM query_history WHERE id = ANY(%s)", (ids,))
+    sb = get_client()
+    sb.table("query_history").delete().in_("id", ids).execute()
 
 
 # ── Feedback CRUD ──────────────────────────────────────────────────────────────
@@ -243,12 +199,10 @@ def save_feedback(
     rating: str,
     routed_repos: list[str],
 ) -> None:
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO feedback (query, answer_snippet, rating, routed_repos)
-                VALUES (%s, %s, %s, %s)
-                """,
-                (query, answer_snippet[:200], rating, json.dumps(routed_repos)),
-            )
+    sb = get_client()
+    sb.table("feedback").insert({
+        "query": query,
+        "answer_snippet": answer_snippet[:200],
+        "rating": rating,
+        "routed_repos": routed_repos,
+    }).execute()

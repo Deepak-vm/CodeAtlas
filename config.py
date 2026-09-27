@@ -82,8 +82,11 @@ GROQ_MODEL_FAST = "llama-3.1-8b-instant"         # cheap pre-filter steps
 GROQ_TEMPERATURE = 0.0
 GROQ_MAX_TOKENS = 2048
 
-# Supabase PostgreSQL (repos metadata, query history, feedback)
-DB_URL = os.getenv("DB_URL", "")   # postgresql://user:pass@host:5432/postgres
+# Supabase (repos metadata, query history, feedback) — via HTTPS REST API
+# Set these in Render dashboard → Environment Variables
+SUPABASE_URL = os.getenv("SUPABASE_URL", "")           # https://xxxx.supabase.co
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")  # service_role secret key
+
 
 
 # LangSmith
