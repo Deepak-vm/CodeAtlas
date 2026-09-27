@@ -634,7 +634,8 @@ export default function App() {
           </div>
         </div>
 
-        <div className="sidebar-foot">groq · jina · faiss</div>
+
+
       </aside>
 
       {/* MAIN */}

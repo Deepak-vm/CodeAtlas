@@ -375,6 +375,41 @@ async def health() -> HealthResponse:
     )
 
 
+@app.get("/debug/disk")
+async def debug_disk() -> dict:
+    """Diagnostic: report what's on the persistent disk. Helps verify Render disk mount."""
+    import shutil
+
+    data_dir = config.DATA_DIR
+    indexes_dir = config.INDEXES_DIR
+    chunks_dir = config.CHUNKS_DIR
+
+    def dir_info(path) -> dict:
+        if not path.exists():
+            return {"exists": False}
+        files = [f.name for f in path.iterdir()] if path.is_dir() else []
+        return {"exists": True, "files": sorted(files)}
+
+    disk = shutil.disk_usage(str(data_dir)) if data_dir.exists() else None
+
+    return {
+        "data_dir":    {"path": str(data_dir),    **dir_info(data_dir)},
+        "indexes_dir": {"path": str(indexes_dir), **dir_info(indexes_dir)},
+        "chunks_dir":  {"path": str(chunks_dir),  **dir_info(chunks_dir)},
+        "disk_usage":  {
+            "total_gb": round(disk.total / 1e9, 2),
+            "used_gb":  round(disk.used  / 1e9, 2),
+            "free_gb":  round(disk.free  / 1e9, 2),
+        } if disk else "data_dir not found",
+        "index_files": {
+            "code_faiss":   config.CODE_FAISS_PATH.exists(),
+            "commit_faiss": config.COMMIT_FAISS_PATH.exists(),
+            "readme_faiss": config.README_FAISS_PATH.exists(),
+            "bm25_code":    config.BM25_CODE_PATH.exists(),
+        },
+    }
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Routes — Repos
 # ─────────────────────────────────────────────────────────────────────────────
