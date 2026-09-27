@@ -77,10 +77,11 @@ USE_JINA_API = os.getenv("USE_JINA_API", "false").lower() == "true"
 # LLM / API
 # ─────────────────────────────────────────────────────────────────────────────
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-GROQ_MODEL_PRIMARY = "llama-3.3-70b-versatile"   # router + synthesizer
-GROQ_MODEL_FAST = "llama-3.1-8b-instant"         # cheap pre-filter steps
+GROQ_MODEL_PRIMARY = "openai/gpt-oss-120b"   # router + synthesizer (largest available)
+GROQ_MODEL_FAST = "openai/gpt-oss-20b"       # cheap pre-filter steps
 GROQ_TEMPERATURE = 0.0
 GROQ_MAX_TOKENS = 2048
+
 
 # Supabase (repos metadata, query history, feedback) — via HTTPS REST API
 # Set these in Render dashboard → Environment Variables
