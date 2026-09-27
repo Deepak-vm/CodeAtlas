@@ -1,0 +1,27 @@
+# render.yaml — Render.com deployment config for Knowledge Base Agent backend
+# Docs: https://render.com/docs/blueprint-spec
+
+services:
+  - type: web
+    name: knowledge-base-agent-api
+    runtime: python
+    buildCommand: pip install -r requirements-deploy.txt
+    startCommand: uvicorn api.main:app --host 0.0.0.0 --port $PORT
+    plan: free
+    envVars:
+      - key: GROQ_API_KEY
+        sync: false               # set this manually in Render dashboard
+      - key: JINA_API_KEY
+        sync: false               # set this manually in Render dashboard
+      - key: USE_JINA_API
+        value: "true"
+      - key: FRONTEND_URL
+        sync: false               # set to your Vercel URL after deploy: https://your-app.vercel.app
+      - key: LANGCHAIN_TRACING_V2
+        value: "false"            # disable LangSmith tracing in prod (optional)
+      - key: LANGCHAIN_PROJECT
+        value: "Knowledge-Base-Agent"
+    disk:
+      name: kb-persistent-data
+      mountPath: /opt/render/project/src/data
+      sizeGB: 1                   # persists FAISS indexes across restarts (free disk)

@@ -22,6 +22,9 @@ repos/
 
 # Environment & Config   
 .env
+# Allow deploy env files (no secrets inside, just URLs)
+!.env.production
+!.env.development
 repos.json
 feedback.jsonl
 

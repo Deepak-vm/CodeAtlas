@@ -63,6 +63,14 @@ EMBEDDING_MAX_SEQ_LEN = 512   # Capped at 512 for CPU speed and RAM safety
 EMBEDDING_BATCH_SIZE = 8     # Reduced to 8 to prevent Linux OOM killer on 8GB RAM
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Jina Embeddings API (remote — no torch/transformers needed)
+# Set USE_JINA_API=true in .env / deployment env vars to use the REST API.
+# Free tier: 1M tokens/month — https://jina.ai
+# ─────────────────────────────────────────────────────────────────────────────
+JINA_API_KEY = os.getenv("JINA_API_KEY", "")
+USE_JINA_API = os.getenv("USE_JINA_API", "false").lower() == "true"
+
+# ─────────────────────────────────────────────────────────────────────────────
 # LLM / API
 # ─────────────────────────────────────────────────────────────────────────────
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
@@ -131,4 +139,11 @@ AMBIGUITY_MIN_REPOS = 2        # must span ≥2 repos to flag ambiguity
 # ─────────────────────────────────────────────────────────────────────────────
 API_HOST = "0.0.0.0"
 API_PORT = 8000
-API_CORS_ORIGINS = ["http://localhost:3000", "http://localhost:5173"]
+
+# Add your Vercel frontend URL here after deploying (or set via FRONTEND_URL env var)
+_frontend_url = os.getenv("FRONTEND_URL", "")
+API_CORS_ORIGINS = [
+    "http://localhost:3000",
+    "http://localhost:5173",
+    *([_frontend_url] if _frontend_url else []),   # injected at runtime from env
+]

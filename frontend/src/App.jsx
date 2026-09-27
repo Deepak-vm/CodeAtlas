@@ -2,7 +2,8 @@ import React, { useState, useEffect, useRef, useCallback } from 'react'
 import './index.css'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import axios from 'axios'
+import axios from './services/api'   // configured with VITE_API_BASE_URL for production
+
 
 // ─── MUI Icons (commit 1: no more emoji icons) ───────────────────────────────
 import SearchIcon from '@mui/icons-material/Search'
