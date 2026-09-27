@@ -640,15 +640,6 @@ export default function App() {
 
       {/* MAIN */}
       <main>
-        <div className="topline">
-          <div>
-            <h1 className="page-title">
-              {activeTab === 'ask' && 'Ask anything across your repositories'}
-              {activeTab === 'history' && 'Query Execution History'}
-              {activeTab === 'repos' && 'Repository Management'}
-            </h1>
-          </div>
-        </div>
 
         {/* ─── HERO SEARCH BAR (ask tab only) ─────────────────────────────── */}
         {activeTab === 'ask' && backendAvailable === false ? (
