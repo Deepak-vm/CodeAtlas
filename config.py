@@ -31,8 +31,11 @@ ROOT_DIR = Path(__file__).parent.resolve()
 #   {"name": "my-backend", "url": "https://github.com/user/my-backend"}
 # ]
 # ─────────────────────────────────────────────────────────────────────────────
-REPOS_CONFIG_FILE = ROOT_DIR / "repos.json"
-REPOS_DIR = ROOT_DIR / "repos"          # where remote repos are cloned into
+# repos.json and cloned repos live inside data/ so they land on Render's
+# persistent disk (mounted at data/) and survive free-tier restarts.
+REPOS_CONFIG_FILE = ROOT_DIR / "data" / "repos.json"   # persistent disk on Render
+REPOS_DIR = ROOT_DIR / "data" / "repos"                 # cloned repos also persisted
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Data directories
@@ -78,6 +81,10 @@ GROQ_MODEL_PRIMARY = "llama-3.3-70b-versatile"   # router + synthesizer
 GROQ_MODEL_FAST = "llama-3.1-8b-instant"         # cheap pre-filter steps
 GROQ_TEMPERATURE = 0.0
 GROQ_MAX_TOKENS = 2048
+
+# Supabase PostgreSQL (repos metadata, query history, feedback)
+DB_URL = os.getenv("DB_URL", "")   # postgresql://user:pass@host:5432/postgres
+
 
 # LangSmith
 LANGCHAIN_API_KEY = os.getenv("LANGCHAIN_API_KEY", "")

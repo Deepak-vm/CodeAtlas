@@ -13,6 +13,8 @@ export default defineConfig({
       '/health':   'http://localhost:8000',
       '/repos':    'http://localhost:8000',
       '/feedback': 'http://localhost:8000',
+      '/history':  'http://localhost:8000',
+
     },
   },
 })

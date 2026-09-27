@@ -21,6 +21,9 @@ services:
         value: "false"            # disable LangSmith tracing in prod (optional)
       - key: LANGCHAIN_PROJECT
         value: "Knowledge-Base-Agent"
+      - key: DB_URL
+        sync: false               # Supabase PostgreSQL connection string
+
     disk:
       name: kb-persistent-data
       mountPath: /opt/render/project/src/data

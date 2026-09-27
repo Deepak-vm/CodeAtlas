@@ -207,21 +207,45 @@ export default function App() {
   // null = not yet checked, true = backend up, false = backend down
   const [backendAvailable, setBackendAvailable] = useState(null)
 
-  // commit 8: History with `saved` flag (replaces separate savedQueries array)
-  const [history, setHistory] = useState(() => {
-    try { return JSON.parse(localStorage.getItem('kb_query_history') || '[]') }
-    catch { return [] }
-  })
+  // History — fetched from Supabase via /history endpoint (shared across all users)
+  const [history, setHistory] = useState([])
+  const [historyLoading, setHistoryLoading] = useState(false)
   // commit 8: history filter pill: 'all' | 'saved'
   const [historyFilter, setHistoryFilter] = useState('all')
   const [historySearchQuery, setHistorySearchQuery] = useState('')
   const [selectedHistoryIds, setSelectedHistoryIds] = useState(new Set())
 
-  // Persist history
-  useEffect(() => {
-    try { localStorage.setItem('kb_query_history', JSON.stringify(history)) }
-    catch {}
-  }, [history])
+  // ── Fetch history from Supabase ─────────────────────────────────────────────
+  const loadHistory = useCallback(async () => {
+    setHistoryLoading(true)
+    try {
+      const res = await axios.get('/history?limit=100')
+      const items = (res.data.history || []).map(h => ({
+        id: h.id,
+        query: h.query,
+        timestamp: h.created_at ? new Date(h.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '',
+        latency_ms: h.latency_ms,
+        citationsCount: (h.citations || []).length,
+        repos: h.routed_repos || [],
+        result: {
+          answer: h.answer,
+          citations: h.citations || [],
+          routed_repos: h.routed_repos || [],
+          routed_types: h.routed_types || [],
+          latency_ms: h.latency_ms,
+          ambiguity_flag: h.ambiguity_flag,
+          ambiguity_detail: h.ambiguity_detail,
+        },
+        saved: h.saved,
+      }))
+      setHistory(items)
+    } catch (e) {
+      console.warn('Could not load history from DB:', e)
+    } finally {
+      setHistoryLoading(false)
+    }
+  }, [axios])
+
 
   // commit 10: session-only conversation thread (never persisted)
   const [conversationHistory, setConversationHistory] = useState([])
@@ -278,7 +302,8 @@ export default function App() {
     } catch {}
   }
 
-  useEffect(() => { loadSystemInfo() }, [])
+  useEffect(() => { loadSystemInfo(); loadHistory() }, [])
+
 
   // ── Repo filter toggle ─────────────────────────────────────────────────────
   const toggleRepoFilter = (repoName) => {
@@ -324,16 +349,18 @@ export default function App() {
         ? [...new Set((data.citations || []).map(c => c.metadata?.repo).filter(Boolean))]
         : selectedRepos.length > 0 ? selectedRepos : reposList.map(r => r.name)
       const historyItem = {
-        id: Date.now(),
+        id: Date.now(),   // temp optimistic ID until we refresh from DB
         query: qText,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         latency_ms: data.latency_ms,
         citationsCount: (data.citations || []).length,
         repos: reposUsed,
         result: data,
-        saved: false,   // bookmark flag
+        saved: false,
       }
-      setHistory(prev => [historyItem, ...prev.slice(0, 49)])
+      setHistory(prev => [historyItem, ...prev.slice(0, 99)])
+      // Refresh from DB in background to get the real ID assigned by Supabase
+      setTimeout(() => loadHistory(), 1500)
     } catch (err) {
       setError(err.response?.data?.detail || err.message || 'Error processing query.')
     } finally {
@@ -345,14 +372,24 @@ export default function App() {
     if (e.key === 'Enter') { e.preventDefault(); handleQuery() }
   }
 
-  // ── commit 8: Toggle bookmark on a history item ────────────────────────────
-  const toggleBookmark = (id) => {
-    setHistory(prev => prev.map(h => h.id === id ? { ...h, saved: !h.saved } : h))
+  // ── Toggle bookmark on a history item (persisted to Supabase) ────────────────
+  const toggleBookmark = async (id) => {
+    const item = history.find(h => h.id === id)
+    if (!item) return
+    const newSaved = !item.saved
+    setHistory(prev => prev.map(h => h.id === id ? { ...h, saved: newSaved } : h))
+    try {
+      await axios.post(`/history/${id}/save`, { saved: newSaved })
+    } catch (e) {
+      // revert on failure
+      setHistory(prev => prev.map(h => h.id === id ? { ...h, saved: !newSaved } : h))
+    }
   }
 
-  const deleteHistoryItem = (id) => {
+  const deleteHistoryItem = async (id) => {
     setHistory(prev => prev.filter(h => h.id !== id))
     setSelectedHistoryIds(prev => { const n = new Set(prev); n.delete(id); return n })
+    try { await axios.delete(`/history/${id}`) } catch {}
   }
 
   // Bulk selection helpers
@@ -363,13 +400,17 @@ export default function App() {
       return n
     })
   }
-  const bulkDelete = (ids) => {
+  const bulkDelete = async (ids) => {
     setHistory(prev => prev.filter(h => !ids.has(h.id)))
     setSelectedHistoryIds(new Set())
+    try { await axios.post('/history/bulk-delete', { ids: [...ids] }) } catch {}
   }
-  const bulkSave = (ids) => {
+  const bulkSave = async (ids) => {
     setHistory(prev => prev.map(h => ids.has(h.id) ? { ...h, saved: true } : h))
     setSelectedHistoryIds(new Set())
+    try {
+      await Promise.all([...ids].map(id => axios.post(`/history/${id}/save`, { saved: true })))
+    } catch {}
   }
 
   // ── commit 6: Submit feedback ──────────────────────────────────────────────

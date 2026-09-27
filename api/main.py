@@ -3,14 +3,22 @@ api/main.py
 
 FastAPI backend for the Knowledge Base Agent.
 
-Endpoints:
-  POST /query      — run the full LangGraph pipeline, return answer + citations
-  POST /feedback   — record thumbs up/down rating for an answer
-  GET  /health     — index status + repos configured
-  GET  /repos      — list available repos
+Storage:
+  - Supabase PostgreSQL (repos metadata, query history, feedback)
+  - Render persistent disk (FAISS indexes, chunk JSONL files — binary, must be on disk)
 
-Run:
-  uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
+Endpoints:
+  POST /query              — run the full LangGraph pipeline, return answer + citations
+  POST /feedback           — record thumbs up/down rating (→ Supabase)
+  GET  /history            — fetch all query history from Supabase
+  POST /history/{id}/save  — toggle saved flag on a history item
+  DELETE /history/{id}     — delete a single history item
+  DELETE /history/bulk     — bulk delete history items
+  GET  /health             — index status + repos configured
+  GET  /repos              — list available repos (from Supabase)
+  POST /repos/add          — add + index a repo (metadata → Supabase)
+  DELETE /repos/{name}     — delete repo (Supabase + indexes)
+  POST /repos/{name}/update — re-index a repo (update Supabase timestamp)
 """
 
 from __future__ import annotations
@@ -21,25 +29,29 @@ import sys
 import time
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import config
 import subprocess
+import db.client as db
 from agents.graph import get_app
 from agents.retrieval_nodes import _code_faiss, _commit_faiss, _readme_faiss, _code_bm25
 from agents.state import AgentState
-from api.schemas import AddRepoRequest, Citation, FeedbackRequest, HealthResponse, QueryRequest, QueryResponse
+from api.schemas import (
+    AddRepoRequest, Citation, FeedbackRequest,
+    HealthResponse, QueryRequest, QueryResponse,
+)
 
 app = FastAPI(
     title="Knowledge Base Agent",
     description="Multi-repo RAG system: ask questions about your own code with citations",
-    version="1.0.0",
+    version="2.0.0",
 )
 
-# ── CORS (allow React dev server) ─────────────────────────────────────────────
+# ── CORS ──────────────────────────────────────────────────────────────────────
 app.add_middleware(
     CORSMiddleware,
     allow_origins=config.API_CORS_ORIGINS,
@@ -48,7 +60,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Lazy-loaded graph (warm on first request, cached after) ───────────────────
+# ── Startup: ensure disk dirs exist + bootstrap Supabase schema ───────────────
+config.DATA_DIR.mkdir(parents=True, exist_ok=True)
+config.CHUNKS_DIR.mkdir(parents=True, exist_ok=True)
+config.INDEXES_DIR.mkdir(parents=True, exist_ok=True)
+config.REPOS_DIR.mkdir(parents=True, exist_ok=True)
+db.bootstrap_schema()   # creates tables if they don't exist
+
+# ── Lazy-loaded LangGraph pipeline ────────────────────────────────────────────
 _graph_app = None
 
 
@@ -59,21 +78,7 @@ def _get_graph():
     return _graph_app
 
 
-def _load_repos_config() -> list[dict]:
-    if config.REPOS_CONFIG_FILE.exists():
-        with open(config.REPOS_CONFIG_FILE, encoding="utf-8") as f:
-            return json.load(f)
-    return []
-
-
-def _save_repos_config(repos: list[dict]) -> None:
-    with open(config.REPOS_CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(repos, f, indent=4)
-
-
-def _load_repo_names() -> list[str]:
-    return [r["name"] for r in _load_repos_config()]
-
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _get_repo_chunk_counts() -> dict[str, int]:
     counts: dict[str, int] = {}
@@ -107,26 +112,6 @@ def _get_last_sync_time() -> str:
     return "Not synced yet"
 
 
-def _get_repo_last_sync_time(repo: dict) -> str:
-    if repo.get("last_synced"):
-        return repo["last_synced"]
-    repo_name = repo.get("name", "")
-    local_path = config.REPOS_DIR / repo_name
-    if local_path.exists():
-        try:
-            mtime = local_path.stat().st_mtime
-            diff_min = max(0, int((time.time() - mtime) / 60))
-            if diff_min < 1:
-                return "Just now"
-            elif diff_min < 60:
-                return f"{diff_min} min ago"
-            else:
-                return datetime.datetime.fromtimestamp(mtime).strftime("%I:%M %p")
-        except Exception:
-            pass
-    return _get_last_sync_time()
-
-
 def _ingest_and_index_single_repo(repo_name: str) -> None:
     """Ingest only the newly added repository and update vector indexes."""
     print(f"[api] Ingesting single repository: {repo_name}...")
@@ -152,14 +137,6 @@ def _ingest_and_index_single_repo(repo_name: str) -> None:
 
 
 def _delete_repo_and_reindex(repo_name: str) -> None:
-    """
-    Instantly remove a repo from all indexes WITHOUT re-embedding any remaining repos.
-    Steps:
-      1. Strip JSONL chunks for deleted repo from chunk files.
-      2. Patch each FAISS index in-place (reconstruct kept vectors, no JinaAI calls).
-      3. Patch BM25 index in-place (retokenize kept chunks, no JinaAI calls).
-      4. Clear in-memory caches.
-    """
     from ingestion.run_ingestion import _remove_repo_from_jsonl
     from indexing.faiss_store import FaissStore
     from indexing.bm25_store import BM25Store
@@ -169,46 +146,39 @@ def _delete_repo_and_reindex(repo_name: str) -> None:
     _remove_repo_from_jsonl(config.COMMIT_CHUNKS_FILE, repo_name)
     _remove_repo_from_jsonl(config.README_CHUNKS_FILE, repo_name)
 
-    print(f"[api] Step 2: Patching FAISS indexes in-place (no re-embedding)...")
+    print(f"[api] Step 2: Patching FAISS indexes in-place...")
     FaissStore.remove_repo_and_save(config.CODE_FAISS_PATH, repo_name)
     FaissStore.remove_repo_and_save(config.COMMIT_FAISS_PATH, repo_name)
     FaissStore.remove_repo_and_save(config.README_FAISS_PATH, repo_name)
 
-    print(f"[api] Step 3: Patching BM25 index in-place...")
+    print(f"[api] Step 3: Patching BM25 index...")
     BM25Store.remove_repo_and_save(config.BM25_CODE_PATH, repo_name)
 
-    print(f"[api] Step 4: Clearing in-memory retriever caches...")
+    print(f"[api] Step 4: Clearing in-memory caches...")
     _code_faiss.cache_clear()
     _commit_faiss.cache_clear()
     _readme_faiss.cache_clear()
     _code_bm25.cache_clear()
-
-    print(f"[api] ✓ Deletion complete for '{repo_name}' — no other repos were re-indexed!")
+    print(f"[api] ✓ Deletion complete for '{repo_name}'")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Routes
+# Routes — Query
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.post("/query", response_model=QueryResponse)
 async def query_endpoint(req: QueryRequest) -> QueryResponse:
-    """
-    Run the full multi-agent RAG pipeline.
-    Returns a grounded answer with file:line citations.
-    """
+    """Run the full multi-agent RAG pipeline and save result to Supabase."""
     t0 = time.perf_counter()
 
-    # Guard: refuse queries when no repos are configured
-    configured_repos = _load_repos_config()
+    configured_repos = db.get_all_repos()
     if not configured_repos:
         raise HTTPException(
             status_code=400,
-            detail="No repositories are configured. Please add and index at least one repository from the Repositories page before querying."
+            detail="No repositories are configured. Please add and index at least one repository from the Repositories page before querying.",
         )
 
     graph = _get_graph()
-
-    # If caller passed specific repos, validate and use; otherwise let router decide
     initial_repos = req.repos if req.repos else []
 
     initial_state: AgentState = {
@@ -235,6 +205,7 @@ async def query_endpoint(req: QueryRequest) -> QueryResponse:
 
     latency_ms = (time.perf_counter() - t0) * 1000
 
+    citations_raw = result.get("citations", [])
     citations = [
         Citation(
             repo=c.get("repo", ""),
@@ -247,8 +218,23 @@ async def query_endpoint(req: QueryRequest) -> QueryResponse:
             snippet=c.get("snippet", ""),
             chunk_type=c.get("chunk_type", "code"),
         )
-        for c in result.get("citations", [])
+        for c in citations_raw
     ]
+
+    # ── Save to Supabase (non-blocking best-effort) ───────────────────────────
+    try:
+        db.save_query(
+            query=req.query,
+            answer=result.get("final_answer", ""),
+            routed_repos=result.get("routed_repos", []),
+            routed_types=result.get("routed_types", []),
+            citations=citations_raw,
+            latency_ms=round(latency_ms, 1),
+            ambiguity_flag=result.get("ambiguity_flag", False),
+            ambiguity_detail=result.get("ambiguity_detail", ""),
+        )
+    except Exception as e:
+        print(f"[db] Warning: could not save query to Supabase: {e}")
 
     return QueryResponse(
         answer=result.get("final_answer", ""),
@@ -261,9 +247,87 @@ async def query_endpoint(req: QueryRequest) -> QueryResponse:
     )
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Routes — Query History
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/history")
+async def get_history(limit: int = 100) -> dict:
+    """Fetch shared query history from Supabase (newest first)."""
+    try:
+        items = db.get_history(limit=limit)
+        return {"history": items, "count": len(items)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch history: {e}")
+
+
+@app.post("/history/{history_id}/save")
+async def toggle_save_history(history_id: int, body: dict = Body(default={})) -> dict:
+    """Toggle the 'saved' bookmark flag on a history item."""
+    saved = body.get("saved", True)
+    try:
+        db.toggle_history_saved(history_id, saved)
+        return {"status": "ok", "id": history_id, "saved": saved}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update history item: {e}")
+
+
+@app.delete("/history/{history_id}")
+async def delete_history_item(history_id: int) -> dict:
+    """Delete a single history entry."""
+    try:
+        db.delete_history_item(history_id)
+        return {"status": "ok", "deleted": history_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete history item: {e}")
+
+
+@app.post("/history/bulk-delete")
+async def bulk_delete_history(body: dict = Body(...)) -> dict:
+    """Bulk delete history items by list of IDs."""
+    ids = body.get("ids", [])
+    if not ids:
+        raise HTTPException(status_code=400, detail="No IDs provided")
+    try:
+        db.bulk_delete_history(ids)
+        return {"status": "ok", "deleted_count": len(ids)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to bulk delete: {e}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Routes — Feedback
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.post("/feedback")
+async def submit_feedback(req: FeedbackRequest) -> dict:
+    """Record a thumbs-up or thumbs-down rating → Supabase feedback table."""
+    try:
+        db.save_feedback(
+            query=req.query,
+            answer_snippet=req.answer_snippet,
+            rating=req.rating,
+            routed_repos=req.routed_repos,
+        )
+    except Exception as e:
+        print(f"[db] Warning: could not save feedback: {e}")
+
+    print(f"[feedback] {req.rating} — '{req.query[:60]}...'")
+    return {"status": "ok", "recorded": req.rating}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Routes — Health
+# ─────────────────────────────────────────────────────────────────────────────
+
 @app.get("/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
     """Check index files and repo configuration."""
+    try:
+        repo_names = [r["name"] for r in db.get_all_repos()]
+    except Exception:
+        repo_names = []
+
     return HealthResponse(
         status="ok",
         indexes_loaded={
@@ -272,14 +336,22 @@ async def health() -> HealthResponse:
             "readme": config.README_FAISS_PATH.exists(),
             "bm25_code": config.BM25_CODE_PATH.exists(),
         },
-        repos_configured=_load_repo_names(),
+        repos_configured=repo_names,
     )
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Routes — Repos
+# ─────────────────────────────────────────────────────────────────────────────
+
 @app.get("/repos")
 async def list_repos() -> dict:
-    """Return configured repos with details, chunk counts, and sync status."""
-    config_repos = _load_repos_config()
+    """Return configured repos with chunk counts from Supabase."""
+    try:
+        config_repos = db.get_all_repos()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load repos: {e}")
+
     chunk_counts = _get_repo_chunk_counts()
     last_sync = _get_last_sync_time()
 
@@ -287,8 +359,8 @@ async def list_repos() -> dict:
         {
             "name": r["name"],
             "url": r.get("url", ""),
-            "chunk_count": chunk_counts.get(r["name"], 0),
-            "last_synced": _get_repo_last_sync_time(r),
+            "chunk_count": chunk_counts.get(r["name"], r.get("chunk_count", 0)),
+            "last_synced": r.get("last_synced", last_sync),
         }
         for r in config_repos
     ]
@@ -299,44 +371,62 @@ async def list_repos() -> dict:
         "repos_detail": repos_detail,
         "count": len(names),
         "chunk_counts": chunk_counts,
-        "last_sync": last_sync
+        "last_sync": last_sync,
     }
 
 
 @app.post("/repos/add")
 async def add_repo(req: AddRepoRequest) -> dict:
-    """Add a new repository to repos.json and trigger single-repo ingestion & indexing."""
-    existing = _load_repos_config()
+    """Add a new repository to Supabase and trigger ingestion + indexing."""
+    try:
+        if db.repo_exists(req.name):
+            raise HTTPException(status_code=400, detail=f"Repository '{req.name}' already exists.")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"DB error checking repo: {e}")
 
-    if any(r["name"].lower() == req.name.lower() for r in existing):
-        raise HTTPException(status_code=400, detail=f"Repository '{req.name}' already exists.")
-
-    new_repo = {
-        "name": req.name.strip(),
-        "url": req.url.strip(),
-        "last_synced": datetime.datetime.now().strftime("%I:%M %p"),
-    }
-    existing.append(new_repo)
-    _save_repos_config(existing)
+    now = datetime.datetime.now().strftime("%I:%M %p")
+    try:
+        db.upsert_repo(name=req.name.strip(), url=req.url.strip(), last_synced=now)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save repo to DB: {e}")
 
     try:
         _ingest_and_index_single_repo(req.name.strip())
     except Exception as e:
+        # Roll back DB entry if ingestion fails
+        try:
+            db.delete_repo(req.name.strip())
+        except Exception:
+            pass
         raise HTTPException(status_code=500, detail=f"Failed to ingest/index repo: {e}")
+
+    # Update chunk count in DB after successful indexing
+    chunk_counts = _get_repo_chunk_counts()
+    try:
+        db.update_repo_sync(
+            name=req.name.strip(),
+            last_synced=now,
+            chunk_count=chunk_counts.get(req.name.strip(), 0),
+        )
+    except Exception:
+        pass  # non-critical
 
     return {"status": "ok", "message": f"Repository '{req.name}' added and indexed successfully."}
 
 
 @app.delete("/repos/{repo_name}")
-async def delete_repo(repo_name: str) -> dict:
-    """Delete a repository from repos.json and update remaining index."""
-    existing = _load_repos_config()
-    filtered = [r for r in existing if r["name"].lower() != repo_name.lower()]
-
-    if len(filtered) == len(existing):
-        raise HTTPException(status_code=404, detail=f"Repository '{repo_name}' not found.")
-
-    _save_repos_config(filtered)
+async def delete_repo_endpoint(repo_name: str) -> dict:
+    """Delete a repository from Supabase and remove from indexes."""
+    try:
+        removed = db.delete_repo(repo_name)
+        if not removed:
+            raise HTTPException(status_code=404, detail=f"Repository '{repo_name}' not found.")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"DB error: {e}")
 
     try:
         _delete_repo_and_reindex(repo_name)
@@ -348,60 +438,30 @@ async def delete_repo(repo_name: str) -> dict:
 
 @app.post("/repos/{repo_name}/update")
 async def update_repo(repo_name: str) -> dict:
-    """
-    Re-index a single repository in-place.
-    Steps:
-      1. Strip old chunks/vectors for this repo only (same as delete, no other repos touched).
-      2. Re-ingest only this repo (git pull → AST chunk → JinaAI embed).
-      3. Append new vectors to FAISS/BM25 indexes.
-      Other repos remain completely untouched — no re-embedding of them.
-    """
-    existing = _load_repos_config()
-    repo_entry = next((r for r in existing if r["name"].lower() == repo_name.lower()), None)
-
-    if not repo_entry:
-        raise HTTPException(status_code=404, detail=f"Repository '{repo_name}' not found in configuration.")
+    """Re-index a single repository in-place and update Supabase timestamp."""
+    try:
+        if not db.repo_exists(repo_name):
+            raise HTTPException(status_code=404, detail=f"Repository '{repo_name}' not found.")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"DB error: {e}")
 
     try:
-        # Step 1: strip old data for this repo from all indexes
         _delete_repo_and_reindex(repo_name)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to strip old index data: {e}")
 
     try:
-        # Step 2: re-ingest & re-embed only this repo (pulls latest from git)
         _ingest_and_index_single_repo(repo_name)
-        # Update last_synced timestamp in repos.json
-        for r in existing:
-            if r["name"].lower() == repo_name.lower():
-                r["last_synced"] = datetime.datetime.now().strftime("%I:%M %p")
-        _save_repos_config(existing)
+        now = datetime.datetime.now().strftime("%I:%M %p")
+        chunk_counts = _get_repo_chunk_counts()
+        db.update_repo_sync(
+            name=repo_name,
+            last_synced=now,
+            chunk_count=chunk_counts.get(repo_name, 0),
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to re-ingest repo: {e}")
 
-    return {"status": "ok", "message": f"Repository '{repo_name}' updated successfully — only this repo was re-indexed."}
-
-
-@app.post("/feedback")
-async def submit_feedback(req: FeedbackRequest) -> dict:
-    """
-    Record a thumbs-up or thumbs-down rating for an answer.
-    Appends a labeled row to data/feedback.jsonl for eval dataset building.
-    """
-    feedback_path = config.DATA_DIR / "feedback.jsonl"
-    feedback_path.parent.mkdir(parents=True, exist_ok=True)
-
-    record = {
-        "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
-        "query": req.query,
-        "answer_snippet": req.answer_snippet[:200],
-        "rating": req.rating,
-        "routed_repos": req.routed_repos,
-    }
-
-    with open(feedback_path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(record, ensure_ascii=False) + "\n")
-
-    print(f"[feedback] {req.rating} — '{req.query[:60]}...'")
-    return {"status": "ok", "recorded": req.rating}
-
+    return {"status": "ok", "message": f"Repository '{repo_name}' updated successfully."}
