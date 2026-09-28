@@ -21,8 +21,9 @@ from backend.app.core.config import settings
 
 JINA_API_URL = "https://api.jina.ai/v1/embeddings"
 JINA_API_BATCH_SIZE = 64
-JINA_RETRY_MAX = 3
+JINA_RETRY_MAX = 5
 JINA_RETRY_DELAY = 2.0
+JINA_INTER_BATCH_DELAY = 1.0   # seconds between batches — avoids 429 rate limits
 
 
 class Embedder:
@@ -115,8 +116,16 @@ class Embedder:
                     break
                 except requests.exceptions.RequestException as e:
                     if attempt < JINA_RETRY_MAX - 1:
-                        print(f"[embedder] Jina API error (attempt {attempt+1}): {e} — retrying")
-                        time.sleep(JINA_RETRY_DELAY)
+                        # 429 = rate limit: wait much longer with exponential backoff
+                        is_rate_limit = (
+                            hasattr(e, "response")
+                            and e.response is not None
+                            and e.response.status_code == 429
+                        )
+                        wait = (30 * (2 ** attempt)) if is_rate_limit else (JINA_RETRY_DELAY * (attempt + 1))
+                        print(f"[embedder] Jina API {'rate limited' if is_rate_limit else 'error'} "
+                              f"(attempt {attempt+1}/{JINA_RETRY_MAX}): {e} — waiting {wait:.0f}s")
+                        time.sleep(wait)
                     else:
                         raise RuntimeError(f"Jina API failed after {JINA_RETRY_MAX} attempts: {e}") from e
 
@@ -126,6 +135,9 @@ class Embedder:
                 dtype=np.float32,
             )
             all_vecs.append(batch_vecs)
+            # Small inter-batch pause to stay under Jina's rate limit
+            if i + JINA_API_BATCH_SIZE < len(texts):
+                time.sleep(JINA_INTER_BATCH_DELAY)
 
         return np.vstack(all_vecs)
 

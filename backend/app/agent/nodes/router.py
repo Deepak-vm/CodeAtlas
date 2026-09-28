@@ -30,10 +30,25 @@ logger = get_logger(__name__)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _load_repo_names() -> list[str]:
+    """Load repo names from Supabase (primary) or fall back to local repos.json."""
+    # Always try Supabase first — repos are stored there, not in a local file
+    try:
+        from backend.app.database.repositories.repos import repo_repository
+        repos = repo_repository.get_all()
+        if repos:
+            return [r["name"] for r in repos]
+    except Exception:
+        pass
+
+    # Fallback: local repos.json (only present in local dev)
     if settings.repos_config_file.exists():
-        with open(settings.repos_config_file) as f:
-            repos = json.load(f)
-        return [r["name"] for r in repos]
+        try:
+            with open(settings.repos_config_file) as f:
+                repos = json.load(f)
+            return [r["name"] for r in repos]
+        except Exception:
+            pass
+
     return []
 
 
