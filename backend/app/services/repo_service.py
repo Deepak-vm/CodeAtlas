@@ -136,6 +136,16 @@ class RepoService:
         except Exception as e:
             raise IngestionError(f"Indexing failed for '{repo_name}': {e}") from e
 
+        # ── Persist indexes to Supabase Storage (survives Render restarts) ─────
+        try:
+            from backend.app.database.storage import index_storage
+            results = index_storage.upload_all()
+            uploaded = sum(1 for v in results.values() if v)
+            log_event(logger, "storage_upload_complete", repo=repo_name, uploaded=uploaded, total=len(results))
+        except Exception as e:
+            # Non-fatal: indexes are on disk for this session, will warn but not fail
+            logger.warning("storage_upload_failed", extra={"repo": repo_name, "error": str(e)})
+
         _invalidate_index_cache()
 
     def _delete_and_reindex(self, repo_name: str) -> None:
@@ -153,6 +163,13 @@ class RepoService:
         FaissStore.remove_repo_and_save(settings.readme_faiss_path, repo_name)
 
         BM25Store.remove_repo_and_save(settings.bm25_code_path, repo_name)
+
+        # ── Sync updated indexes back to Supabase Storage ────────────────────
+        try:
+            from backend.app.database.storage import index_storage
+            index_storage.upload_all()
+        except Exception as e:
+            logger.warning("storage_sync_after_delete_failed", extra={"error": str(e)})
 
         _invalidate_index_cache()
         log_event(logger, "repo_deleted_from_index", repo=repo_name)

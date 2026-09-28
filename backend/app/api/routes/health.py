@@ -70,3 +70,27 @@ async def debug_disk() -> dict:
             "bm25_code":    settings.bm25_code_path.exists(),
         },
     }
+
+
+@router.get("/debug/storage")
+async def debug_storage() -> dict:
+    """Diagnostic: show which index files are persisted in Supabase Storage."""
+    try:
+        from backend.app.database.storage import index_storage
+        bucket_status = index_storage.status()
+        local_status = {
+            "code_faiss":   settings.code_faiss_path.exists(),
+            "commit_faiss": settings.commit_faiss_path.exists(),
+            "readme_faiss": settings.readme_faiss_path.exists(),
+            "bm25_code":    settings.bm25_code_path.exists(),
+            "code_chunks":  settings.code_chunks_file.exists(),
+            "commit_chunks": settings.commit_chunks_file.exists(),
+            "readme_chunks": settings.readme_chunks_file.exists(),
+        }
+        return {
+            "supabase_storage": bucket_status,
+            "local_disk": local_status,
+            "ready_to_serve": local_status["code_faiss"] and local_status["bm25_code"],
+        }
+    except Exception as e:
+        return {"error": str(e)}

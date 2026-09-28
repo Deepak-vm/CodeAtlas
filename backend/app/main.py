@@ -92,11 +92,13 @@ app.include_router(health.router, tags=["Health (legacy)"])
 
 @app.on_event("startup")
 async def startup_event() -> None:
-    """Ensure data directories exist and DB connection is live."""
+    """Ensure data directories exist, DB connection is live, and indexes are restored."""
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     settings.chunks_dir.mkdir(parents=True, exist_ok=True)
     settings.indexes_dir.mkdir(parents=True, exist_ok=True)
     settings.repos_dir.mkdir(parents=True, exist_ok=True)
+    (settings.indexes_dir / "faiss").mkdir(parents=True, exist_ok=True)
+    (settings.indexes_dir / "bm25").mkdir(parents=True, exist_ok=True)
 
     # DB ping
     from backend.app.database.client import ping
@@ -104,3 +106,19 @@ async def startup_event() -> None:
         logger.info("supabase_connected")
     else:
         logger.warning("supabase_connection_failed")
+
+    # ── Restore indexes from Supabase Storage ──────────────────────────────────
+    # Render free plan has no persistent disk. We store FAISS/BM25/chunk files
+    # in a Supabase Storage bucket and download them here on every startup.
+    try:
+        from backend.app.database.storage import index_storage
+        results = index_storage.download_all()
+        downloaded = sum(1 for v in results.values() if v)
+        total = len(results)
+        logger.info("storage_restore_complete", extra={"downloaded": downloaded, "total": total})
+        if downloaded > 0:
+            # Invalidate any stale in-memory cache so fresh files are loaded
+            from backend.app.agent.nodes.retrieve import invalidate_index_cache
+            invalidate_index_cache()
+    except Exception as e:
+        logger.warning("storage_restore_failed", extra={"error": str(e)})
