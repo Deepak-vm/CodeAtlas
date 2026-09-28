@@ -1,8 +1,5 @@
 # CodeAtlas — Personal Codebase Knowledge Agent
 ## Complete Technical Interview Preparation Guide
-
-> Generated from actual codebase analysis. Every section is grounded in the real source code.
-
 ---
 
 # 1. Elevator Pitch (30 Seconds)

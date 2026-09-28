@@ -1,4 +1,4 @@
-# Python 
+# Python
 __pycache__/
 *.pyc
 *.pyo
@@ -8,39 +8,45 @@ __pycache__/
 dist/
 build/
 
-# Virtual environments 
+# Virtual environments
 venv/
 .venv/
 env/
 
-# Data 
+# Data (generated — persisted on Render disk, not in git)
 data/chunks/
 data/indexes/
+data/repos/
 
-# Cloned repos 
-repos/
-
-# Environment & Config   
+# Environment & Config (secrets must never be committed)
 .env
+
 # Allow deploy env files (no secrets inside, just URLs)
 !.env.production
 !.env.development
-repos.json
-feedback.jsonl
 
-# Scratch & Automation Scripts 
+# Repos config (managed via Supabase in prod, local override only)
+repos.json
+
+# Scratch & one-off scripts
 rewrite_*.py
 fix_git_history.py
+feedback.jsonl
 
-# Node / frontend      
+# Node / frontend
 frontend/node_modules/
 frontend/dist/
 
-# Misc 
-.DS_Store
+# IDE
+.vscode/
+.idea/
+*.DS_Store
+
+# Logs
 *.log
 *.json.bak
 
-# Keep data directory structure (empty) 
+# Keep data directory structure (empty sentinel files)
 !data/chunks/.gitkeep
 !data/indexes/.gitkeep
+

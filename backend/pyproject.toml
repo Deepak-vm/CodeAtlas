@@ -1,0 +1,56 @@
+[project]
+name = "knowledge-base-agent-backend"
+version = "3.0.0"
+description = "Multi-repo RAG system: ask questions about your own code with citations"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "langgraph>=0.2.0",
+    "langchain>=0.3.0",
+    "langchain-groq>=0.2.0",
+    "langchain-community>=0.3.0",
+    "langsmith>=0.1.0",
+    "faiss-cpu>=1.7.4",
+    "gitpython>=3.1.40",
+    "tree-sitter==0.21.3",
+    "tree-sitter-javascript==0.21.4",
+    "rank-bm25>=0.2.2",
+    "fastapi>=0.111.0",
+    "uvicorn[standard]>=0.29.0",
+    "python-dotenv>=1.0.0",
+    "tqdm>=4.66.0",
+    "rich>=13.0.0",
+    "typer>=0.12.0",
+    "pydantic>=2.0.0",
+    "requests>=2.31.0",
+    "numpy>=1.26.0",
+    "supabase>=2.0.0",
+]
+
+[project.scripts]
+# Run from the project root
+kb-ingest   = "backend.scripts.ingest:app"
+kb-index    = "backend.scripts.index:app"
+kb-evaluate = "backend.scripts.evaluate:app"
+kb-serve    = "backend.app.main:app"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.backends.legacy:build"
+
+[tool.setuptools.packages.find]
+where = [".."]      # find packages relative to repo root
+include = ["backend*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
