@@ -2,47 +2,48 @@
 
 ## System Overview
 
-The Knowledge Base Agent is a multi-repo RAG (Retrieval-Augmented Generation) system that lets developers ask questions about their own codebases and receive cited, grounded answers.
+The Knowledge Base Agent (CodeAtlas) is a multi-repo RAG (Retrieval-Augmented Generation) system that lets developers ask natural-language questions about their own codebases and receive cited, grounded answers.
 
-**Stack:** FastAPI · LangGraph · Groq LLM · Jina Embeddings · FAISS · BM25 · Supabase (PostgreSQL) · React
+**Stack:** FastAPI · LangGraph · Groq LLM · Jina Embeddings · FAISS · BM25 · Supabase (PostgreSQL + Storage) · React (Vite)
 
-**Deployment:** Render (backend) · Vercel (frontend) · Supabase cloud (database)
+**Deployment:** Render (backend) · Vercel (frontend) · Supabase Cloud (database & object storage)
 
 ---
 
 ## Request Lifecycle
 
 ```
-Browser
+Browser (React Frontend)
   │
   ▼ POST /query { query, repos?, conversation_history? }
 FastAPI (backend/app/main.py)
   │
   ▼ call
-ChatService (services/chat_service.py)
-  │  ├── validates: repos configured
-  │  ├── invokes: LangGraph pipeline
-  │  └── saves: query history → Supabase
+ChatService (backend/app/services/chat_service.py)
+  │  ├── validates: repos configured & valid
+  │  ├── invokes: LangGraph workflow graph
+  │  └── saves: query record → Supabase database (`query_history`)
   │
   ▼ invoke(initial_state)
-LangGraph Graph (agent/graph.py)
+LangGraph Workflow Graph (backend/app/agent/graph.py)
   │
   ├──[route_query]──────────────────────────────────────────────┐
-  │  LLM classifies → routed_repos, routed_types                │
+  │  Groq LLM classifies → routed_repos, routed_types           │
   │                                                              │
   ├──[retrieve_code]────[retrieve_commits]────[retrieve_readme] │
-  │  FAISS+BM25 hybrid   FAISS dense            FAISS dense     │
+  │  FAISS + BM25       FAISS dense            FAISS dense     │
+  │  hybrid (alpha=0.6) search                 search          │
   │        │                  │                      │           │
   │        └──────────────────┴──────────────────────┘           │
   │                           │                                  │
   ├──[check_ambiguity]                                           │
-  │  detects cross-repo conflicts                                │
+  │  detects multi-repo architectural conflicts                  │
   │                                                              │
   ├──[synthesize_answer]                                         │
-  │  Groq Llama → grounded, cited answer                        │
+  │  Groq Llama-3.3-70b → grounded answer with inline citations  │
   │                                                              │
   └──[format_citations]                                          │
-     extracts structured citation objects                        │
+     extracts structured citation objects with code snippets     │
   │
   ▼ QueryResponse { answer, citations, routing_info, latency_ms }
 ```
@@ -61,7 +62,7 @@ START → route_query → retrieve_code ─────┐
 
 ### Fan-out / Join
 
-The three retrieval nodes run **in parallel** (LangGraph fan-out). The `AgentState` fields `code_chunks`, `commit_chunks`, and `readme_chunks` are annotated with `operator.add`, so LangGraph merges results from all three branches before calling `check_ambiguity`.
+The three retrieval nodes (`retrieve_code`, `retrieve_commits`, `retrieve_readme`) run **in parallel** (LangGraph fan-out). The `AgentState` list fields (`code_chunks`, `commit_chunks`, `readme_chunks`) are annotated with `operator.add`, so LangGraph merges retrieved chunks from all three branches prior to executing `check_ambiguity`.
 
 ---
 
@@ -69,17 +70,17 @@ The three retrieval nodes run **in parallel** (LangGraph fan-out). The `AgentSta
 
 ```python
 class AgentState(TypedDict):
-    query: str                    # Input
-    routed_repos: list[str]       # Router output
-    routed_types: list[str]       # Router output
-    code_chunks: Annotated[...]   # Retrieval output (merged from parallel branches)
-    commit_chunks: Annotated[...] # Retrieval output
-    readme_chunks: Annotated[...] # Retrieval output
-    ambiguity_flag: bool          # Ambiguity detection
-    ambiguity_detail: str
-    conversation_history: list    # Multi-turn memory (session-only)
-    final_answer: str             # Output
-    citations: list               # Output
+    query: str                                             # User question
+    routed_repos: list[str]                                # Router output
+    routed_types: list[str]                                # Router output
+    code_chunks: Annotated[list[dict], operator.add]       # Hybrid search results
+    commit_chunks: Annotated[list[dict], operator.add]     # Commit dense search results
+    readme_chunks: Annotated[list[dict], operator.add]     # Readme dense search results
+    ambiguity_flag: bool                                   # Ambiguity flag
+    ambiguity_detail: str                                  # Conflict explanation
+    conversation_history: list[dict]                       # Session multi-turn memory
+    final_answer: str                                      # Generated output
+    citations: list[dict]                                  # Structured citations
 ```
 
 ---
@@ -90,83 +91,91 @@ class AgentState(TypedDict):
 RetrievalPipeline (backend/app/retrieval/pipeline.py)
   │
   ├── search_code()
-  │     FAISS IndexFlatIP (inner product = cosine on L2-normalized vecs)
+  │     FAISS IndexFlatIP (768-dim inner product / cosine similarity)
   │       ↓ top_k_dense candidates (default: 10)
-  │     BM25 hybrid rerank (alpha=0.6 dense, 0.4 BM25)
+  │     BM25 Okapi reranking (alpha=0.6 dense + 0.4 sparse)
   │       ↓ top_k_final results (default: 5)
   │
   ├── search_commits()
-  │     FAISS dense only → top-5
+  │     FAISS dense search → top_k (default: 5)
   │
   └── search_readme()
-        FAISS dense only → top-5
+        FAISS dense search → top_k (default: 5)
 
-Embeddings: Jina v2 base-code (768 dim)
-  → API mode (USE_JINA_API=true): Jina REST API (no torch needed)
-  → Local mode (USE_JINA_API=false): sentence-transformers (local inference)
+Embeddings: Jina Embeddings v2 Base Code (768-dimensional)
+  → API Mode (USE_JINA_API=true): Jina REST API (lightweight runtime, no GPU/torch dependency)
+  → Local Mode (USE_JINA_API=false): sentence-transformers / PyTorch
 ```
 
 ---
 
-## Tool & Index Architecture
+## Storage & Index Persistence Architecture
+
+To support free cloud hosting (e.g., Render free tier without persistent disk), FAISS vector indices and BM25 models are automatically backed up to and synchronized from **Supabase Storage** (`kb-indexes` bucket).
 
 ```
-data/
-├── chunks/
-│   ├── code_chunks.jsonl     ← produced by ingestion/
-│   ├── commit_chunks.jsonl
-│   └── readme_chunks.jsonl
+Local Data Directory (data/):
+├── processed/
+│   ├── code_chunks.jsonl        ← Ingested AST chunks
+│   ├── commit_chunks.jsonl      ← Ingested git commit messages
+│   └── readme_chunks.jsonl      ← Ingested doc chunks
 └── indexes/
-    ├── code.faiss + .meta    ← produced by indexing/
-    ├── commits.faiss + .meta
-    ├── readme.faiss + .meta
-    └── bm25_code.pkl
-```
+    ├── faiss/
+    │   ├── code.faiss + .meta   ← FAISS index for code
+    │   ├── commits.faiss + .meta← FAISS index for git commits
+    │   └── readme.faiss + .meta ← FAISS index for documentation
+    └── bm25/
+        └── bm25_code.pkl        ← BM25 sparse index
 
-**Index lifecycle:**
-1. `scripts/ingest.py` → reads repos from Supabase → clones/walks → produces JSONL chunks
-2. `scripts/build_index.py` → reads JSONL → embeds → writes FAISS + BM25 indexes
-3. API startup → `RetrievalPipeline.load()` loads indexes into memory (once, cached)
+Supabase Storage Sync (backend/app/database/storage.py):
+  ├── On Startup: index_storage.download_all() downloads files if local disk is empty
+  └── Post Indexing / Repo Add: index_storage.upload_all() persists index artifacts to cloud
+```
 
 ---
 
-## Database Architecture
+## Database Schema (Supabase PostgreSQL)
+
+Access is performed via Supabase HTTP REST API (`supabase-py` SDK):
 
 ```
-Supabase PostgreSQL (via HTTPS REST API — no TCP 5432)
-  │
-  ├── repos          → RepoRepository (database/repositories/repos.py)
-  ├── query_history  → HistoryRepository (database/repositories/history.py)
-  └── feedback       → FeedbackRepository (database/repositories/feedback.py)
-
 Tables:
-  repos           : name, url, last_synced, chunk_count
-  query_history   : query, answer, routed_*, citations, latency_ms, ambiguity_*
-  feedback        : query, answer_snippet, rating (up|down), routed_repos
+  1. repos
+     - id (UUID), name (TEXT UNIQUE), url (TEXT), status (TEXT),
+       chunk_count (INT), file_count (INT), commit_count (INT),
+       last_synced (TIMESTAMPTZ), created_at (TIMESTAMPTZ)
+
+  2. query_history
+     - id (UUID), query (TEXT), answer (TEXT),
+       routed_repos (JSONB), routed_types (JSONB),
+       citations (JSONB), ambiguity_flag (BOOL), ambiguity_detail (TEXT),
+       latency_ms (INT), is_saved (BOOL), created_at (TIMESTAMPTZ)
+
+  3. feedback
+     - id (UUID), query (TEXT), rating (TEXT: 'up' | 'down'),
+       answer_snippet (TEXT), routed_repos (JSONB), created_at (TIMESTAMPTZ)
 ```
 
 ---
 
 ## API Architecture
 
-All routes are thin — they call services, not agent or DB code directly.
+FastAPI backend providing REST endpoints under root `/` and `/api/v1/`:
 
 ```
-POST /query                     → chat_service.chat()
-GET  /history                   → history_repository.get_recent()
-POST /history/{id}/save         → history_repository.toggle_saved()
-DELETE /history/{id}            → history_repository.delete()
-POST /history/bulk-delete       → history_repository.bulk_delete()
-POST /feedback                  → feedback_repository.save()
-GET  /health                    → repo_service.get_health()
-GET  /debug/disk                → disk diagnostics
-GET  /repos                     → repo_service.list_repos()
-POST /repos/add                 → repo_service.add_repo()
-DELETE /repos/{name}            → repo_service.delete_repo()
-POST /repos/{name}/update       → repo_service.update_repo()
+POST   /query                     → ChatService (executes LangGraph agent)
+GET    /history                   → HistoryRepository (list recent queries)
+POST   /history/{id}/save         → HistoryRepository (toggle bookmark/saved)
+DELETE /history/{id}            → HistoryRepository (delete single entry)
+POST   /history/bulk-delete       → HistoryRepository (bulk clear history)
+POST   /feedback                  → FeedbackRepository (record user rating)
+GET    /health                    → RepoService (healthcheck & statistics)
+GET    /debug/disk                → Index & disk diagnostic status
+GET    /repos                     → RepoService (list registered repositories)
+POST   /repos/add                 → RepoService (clone, ingest & re-index repository)
+DELETE /repos/{name}            → RepoService (delete repository & rebuild index)
+POST   /repos/{name}/update       → RepoService (pull latest commits & re-index)
 ```
-
-Versioned routes also available under `/api/v1/` prefix.
 
 ---
 
@@ -174,39 +183,36 @@ Versioned routes also available under `/api/v1/` prefix.
 
 ```
 frontend/src/
-├── App.jsx            ← Main component (feature-rich, 1600+ lines)
-├── index.css          ← Global styles with CSS custom properties
-├── main.jsx           ← React entrypoint
+├── App.jsx            ← React SPA (Chat UI, Repo Manager, History Sidebar, Filters)
+├── main.jsx           ← Entry point
+├── index.css          ← Dark UI design system (CSS variables, glassmorphism, animations)
 └── services/
-    └── api.js         ← Axios instance (baseURL from VITE_API_BASE_URL)
+    └── api.js         ← Axios instance (configured via VITE_API_BASE_URL)
 ```
 
-**Key frontend features:**
-- Chat interface with streaming-style rendering
-- Citation popovers with code snippets
-- Repository filter chips
-- Query history with bookmarks
-- Repo management (add/delete/update)
-- Thumbs up/down feedback
-- Multi-turn conversation with memory
+**Key Frontend Capabilities:**
+- Chat interface with inline citations & code expandable details
+- Interactive Repository Filter Chips (all vs specific repos)
+- Repository Management Modal (Add GitHub Repo, Sync, Delete)
+- Query History drawer with search, filter by saved, and bulk delete
+- Helpful suggested starter questions per repository
+- Micro-interactions, animated states, and responsive dark theme
 
 ---
 
-## Observability
+## Observability & Logging
 
 Structured logging via `backend/app/core/logging.py`:
 
 ```
-format: {timestamp} {level} [{module}] req={request_id} {key}={value} {message}
+Format: {timestamp} [{level}] [{module}] req={request_id} {key}={value} {message}
 ```
 
-Key events logged per request:
+Key lifecycle events logged per request:
 - `request_started`
-- `pipeline_started` / `pipeline_completed`
-- `route_query` (repos + types + source)
-- `retrieve_code` / `retrieve_commits` / `retrieve_readme` (chunk counts)
-- `ambiguity_detected`
-- `answer_synthesized`
-- `citations_formatted`
-- `history_saved`
-- `request_completed` (with latency_ms)
+- `route_query` (classified repos and node types)
+- `retrieve_code` / `retrieve_commits` / `retrieve_readme` (chunk counts & latency)
+- `ambiguity_detected` (cross-repo architectural conflict details)
+- `answer_synthesized` (LLM token generation details)
+- `citations_formatted` (extracted source references)
+- `request_completed` (total latency in ms)

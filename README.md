@@ -1,284 +1,359 @@
-# CodeAtlas — Personal Codebase Knowledge Agent
+# CodeAtlas — Multi-Repo Codebase Knowledge Agent
 
-A multi-agent Retrieval-Augmented Generation (RAG) system built with **LangGraph**, **Groq Llama 3.3 70B**, **FAISS**, and **Jina Code Embeddings**. It indexes custom repositories, git commit histories, and documentation, answering queries like *"where have I implemented WebSocket real-time features before?"* with exact file, line, and commit citations.
+A self-hostable RAG (Retrieval-Augmented Generation) system that lets you **ask natural-language questions about your own code** and get cited, grounded answers. Add any GitHub repository from the UI, and the agent will index it so you can query across all your projects at once.
+
+**Live demo:** [code-atlas-snowy.vercel.app](https://code-atlas-snowy.vercel.app)  
+**Backend API:** [codeatlas-zyys.onrender.com](https://codeatlas-zyys.onrender.com/docs)
 
 ---
 
-## System Architecture
+## What it does
+
+- **Ask anything about your code** — "Where did I implement retry logic?", "Who changed the auth layer and why?", "How does the WebSocket connection work?"
+- **Multi-repo search** — index multiple repos and filter by repo at query time
+- **Three content types** — code (AST-chunked), git commit history, and README/docs
+- **Hybrid retrieval** — FAISS dense search + BM25 keyword rerank for code; dense-only for commits and docs
+- **Cross-repo ambiguity detection** — when the same concept appears in multiple repos, the agent compares implementations instead of picking one silently
+- **Grounded answers** — every claim links to a specific file and line number
+- **Multi-turn conversation** — follow-up questions use the last 3 turns of session context
+- **Persistent history** — all queries and answers are saved to Supabase and visible in the History tab
+- **Thumbs feedback** — rate answers up or down; feedback is saved to Supabase
+
+---
+
+## Architecture
 
 ```
-                              ┌─────────────────────┐
-                              │   Query (CLI/API)   │
-                              └──────────┬──────────┘
-                                         │
-                              ┌──────────▼──────────┐
-                              │   Router Agent      │
-                              │ (Groq Llama 3.3 70B │
-                              │  — repo + type cls) │
-                              └──────────┬──────────┘
-                                         │
-             ┌───────────────────────────┼───────────────────────────┐
-             ▼                           ▼                           ▼
-     ┌───────────────┐           ┌───────────────┐           ┌───────────────┐
-     │ Code Retriever│           │CommitRetriever│           │Doc / README   │
-     │ (FAISS + BM25 │           │ (FAISS dense) │           │ Retriever     │
-     │  Hybrid)      │           │               │           │ (FAISS dense) │
-     └───────┬───────┘           └───────┬───────┘           └───────┬───────┘
-             │                           │                           │
-             └───────────────────┬───────┴───────────────────────────┘
-                                 ▼
-                     ┌───────────────────────┐
-                     │   Ambiguity Checker   │
-                     │ (Flags cross-repo     │
-                     │  conflicting impls)   │
-                     └───────────┬───────────┘
-                                 ▼
-                     ┌───────────────────────┐
-                     │    Synthesis Agent    │
-                     │ (Grounded explanation │
-                     │  via Groq Llama 3.3)  │
-                     └───────────┬───────────┘
-                                 ▼
-                     ┌───────────────────────┐
-                     │  Citation Formatter   │
-                     │  (file:line & commit  │
-                     │   verification)       │
-                     └───────────────────────┘
+Frontend (React/Vite, Vercel)
+    │
+    └── POST /query ──────────────────────────────────────────────────┐
+                                                                       │
+Backend (FastAPI, Render free tier)                                    │
+    │                                                                  │
+    └── LangGraph StateGraph pipeline                                  │
+          │                                                            │
+          ├── route_query          ← Groq LLM decides which repos      │
+          │                          and content types to search       │
+          │                                                            │
+          ├── retrieve_code        ┐                                   │
+          ├── retrieve_commits     ├── 3 parallel branches             │
+          └── retrieve_readme      ┘                                   │
+                    │                                                  │
+                    ▼                                                  │
+             check_ambiguity       ← detects cross-repo conflicts      │
+                    │                                                  │
+                    ▼                                                  │
+            synthesize_answer      ← Groq LLM generates cited answer  │
+                    │                                                  │
+                    ▼                                                  │
+            format_citations       ← structured citation list         │
+                    │                                                  │
+                    └──────────────────────────────────────────────────┘
+
+Data layer
+    ├── Supabase PostgreSQL  — repos table, query_history, feedback
+    └── Supabase Storage     — FAISS + BM25 + JSONL chunks (bucket: kb-indexes)
+                               (no persistent disk needed on Render free tier)
 ```
 
 ---
 
-## Tech Stack
+## Tech stack
 
-### **AI & Multi-Agent Engine**
-- **LangGraph**: Stateful multi-agent orchestration for intent routing, parallel retrieval, ambiguity detection, and grounded answer synthesis.
-- **Groq (Llama 3.3 70B)**: Ultra-fast LLM inference engine powering natural language routing, cross-repo synthesis, and reasoning.
-
-### **Embeddings & Vector Search**
-- **Jina Code Embeddings (`jina-embeddings-v2-base-code`)**: 768-dimensional dense code embedding model supporting 4096+ token context windows.
-- **FAISS (Facebook AI Similarity Search)**: Vector similarity indexing for code snippet, commit log, and Markdown documentation retrieval.
-- **BM25 (Rank-BM25)**: Sparse keyword ranker for symbol-exact function and class name matching. Fused via linear interpolation (α=0.6 dense, 0.4 sparse).
-
-### **Ingestion & Parsing**
-- **Tree-sitter & AST**: Syntax-aware AST parsing for Python, JavaScript, and TypeScript to preserve exact function boundaries and line numbers.
-- **GitPython**: Git history analysis engine extracting commit trees, author metadata, diff statistics, and commit messages. Each commit chunk surfaces the primary changed file as `file_path` metadata for accurate citation lookup.
-
-### **Backend & API Layer**
-- **FastAPI**: Modern Python web framework exposing REST endpoints for RAG execution, query history management, and single-repo re-indexing.
-- **Pydantic**: Type validation and schema definitions for request and response models.
-
-### **Frontend & UI**
-- **React 18 + Vite**: High-density single-page web app with custom CSS variables.
-- **Material-UI (MUI) Icons**: Icon set for navigation rail, repo colour dots, and inline history controls.
-- **React Markdown**: Markdown engine with code block syntax highlighting and inline citation popovers.
+| Layer | Technology |
+|:---|:---|
+| Frontend | React 18, Vite, Material UI icons, react-markdown |
+| Backend | FastAPI + Uvicorn, Python 3.11+ |
+| Agent orchestration | LangGraph (`StateGraph` with parallel fan-out) |
+| LLM | Groq API (`openai/gpt-oss-120b` primary, `openai/gpt-oss-20b` fast) |
+| Embeddings | Jina Embeddings API (`jina-embeddings-v2-base-code`, dim=768) |
+| Vector index | FAISS `IndexFlatIP` (inner-product / cosine similarity) |
+| Keyword index | BM25 (`rank-bm25`) with camelCase tokenisation |
+| Code parsing | Python `ast` module; tree-sitter for JS/TS/JSX/TSX |
+| Git history | GitPython |
+| Database | Supabase (PostgreSQL via HTTPS REST API) |
+| Index persistence | Supabase Storage bucket `kb-indexes` |
+| Deployment | Render (backend, free tier) + Vercel (frontend) |
 
 ---
 
-## Key Features & Technical Differentiators
-
-1. **AST-Aware & Tree-Sitter Chunking** — Extracts exact function, class, and method definitions with preserved line numbers rather than arbitrary token cuts. Falls back gracefully to regex declaration parsing for JS/TS if needed.
-2. **Code-Specific Embedding Model** — Powered by `jinaai/jina-embeddings-v2-base-code` (768-dim, 4096+ token context), specifically trained for semantic code search across 30+ programming languages.
-3. **Hybrid Dense + Sparse Retrieval** — Combines dense vector similarity (FAISS) with BM25 keyword matching over symbol and function names to guarantee high recall for exact code symbols.
-4. **Cross-Repo Ambiguity Detection** — Automatically flags when the same concept is implemented differently across multiple repositories, switching the synthesis agent to compare-and-contrast mode.
-5. **Multi-Content Indexing** — Indexes code files, complete git commit history (author, date, changed files, message), and Markdown documentation in dedicated FAISS vector spaces.
-6. **Strict Citation Verification** — Cross-references every generated claim against ground-truth chunk metadata to eliminate hallucinated line numbers or non-existent file paths.
-7. **Session Multi-Turn Context** — Remembers conversation turns within an active session, providing context-aware follow-up answers with visual turn indicators.
-8. **Query History Management** — Local history interface with search, preview, bookmarking, and bulk operations (select all, save, delete).
-9. **Noise-Filtered Indexing** — `eval/`, `migrations/`, `node_modules/`, and similar infrastructure directories are pruned from the code index at walk time. A `SKIP_FILENAMES` allowlist further excludes root-level debug and check scripts committed to target repos, preventing retrieval pollution.
-10. **Isolated Single-Repo Updates** — Individual update controls on repository cards that pull remote updates and re-embed a single repository without rebuilding the entire vector store.
-
----
-
-## Repository Structure
+## Repository structure
 
 ```
 Knowledge-Base-Agent/
-├── .env                          # API Keys (GROQ_API_KEY, LANGCHAIN_API_KEY)
-├── config.py                     # Central configuration & tunable parameters
-├── repos.json                    # Repository list (GitHub URLs or local paths)
-├── requirements.txt              # Project dependencies
-│
-├── ingestion/                    # Code & Git Ingestion
-│   ├── repo_walker.py            # Recursive directory walker & noise filtering
-│   ├── python_chunker.py         # AST module chunker for Python
-│   ├── js_chunker.py             # tree-sitter & regex fallback for JS/TS
-│   ├── commit_ingester.py        # GitPython log & commit document ingester
-│   ├── readme_ingester.py        # Section-based Markdown chunker
-│   └── run_ingestion.py          # Ingestion CLI runner
-│
-├── indexing/                     # Embeddings & Vector Store
-│   ├── embedder.py               # Jina Code Embeddings wrapper
-│   ├── faiss_store.py            # FAISS Inner Product index & metadata store
-│   ├── bm25_store.py             # BM25 symbol ranker
-│   └── build_indexes.py          # Vector store index builder CLI
-│
-├── agents/                       # LangGraph Multi-Agent Engine
-│   ├── state.py                  # LangGraph AgentState TypedDict
-│   ├── router.py                 # Groq Llama 3.3 router node
-│   ├── retrieval_nodes.py        # Parallel code, commit, and doc retrievers
-│   ├── ambiguity_checker.py      # Cross-repo conflict detector
-│   ├── synthesizer.py            # Grounded answer generation node
-│   ├── citation_formatter.py     # Ground-truth citation parser
-│   └── graph.py                  # StateGraph compiler & standalone CLI
-│
-├── api/                          # REST API Layer
-│   ├── main.py                   # FastAPI application with CORS
-│   └── schemas.py                # Pydantic request/response schemas
-│
-├── frontend/                     # React UI
-│   ├── package.json              # React + Vite + MUI setup
-│   ├── vite.config.js            # API proxy configuration
+├── backend/
+│   ├── app/
+│   │   ├── main.py              # FastAPI app factory + startup (restores indexes from Supabase)
+│   │   ├── agent/
+│   │   │   ├── graph.py         # LangGraph StateGraph assembly
+│   │   │   ├── state.py         # AgentState TypedDict
+│   │   │   ├── nodes/
+│   │   │   │   ├── router.py    # route_query node (Groq LLM → repos + content types)
+│   │   │   │   ├── retrieve.py  # retrieve_code / retrieve_commits / retrieve_readme
+│   │   │   │   ├── ambiguity.py # check_ambiguity node (cross-repo conflict detection)
+│   │   │   │   ├── synthesize.py# synthesize_answer node (Groq LLM)
+│   │   │   │   └── citations.py # format_citations node
+│   │   │   └── prompts/
+│   │   │       ├── router.py    # Router system prompt + few-shot examples
+│   │   │       └── answer.py    # Synthesis prompts (normal + ambiguity mode)
+│   │   ├── api/
+│   │   │   └── routes/
+│   │   │       ├── chat.py      # POST /query, GET /history, POST /feedback, etc.
+│   │   │       ├── repos.py     # GET /repos, POST /repos/add, DELETE, POST /update
+│   │   │       └── health.py    # GET /health, GET /debug/disk, GET /debug/storage
+│   │   ├── core/
+│   │   │   ├── config.py        # All settings (env vars, paths, model names, thresholds)
+│   │   │   ├── exceptions.py    # Typed exception hierarchy → clean JSON error responses
+│   │   │   └── logging.py       # Structured JSON logging
+│   │   ├── database/
+│   │   │   ├── client.py        # Supabase client singleton
+│   │   │   ├── storage.py       # Supabase Storage — upload/download index files
+│   │   │   └── repositories/
+│   │   │       ├── repos.py     # CRUD for `repos` table
+│   │   │       ├── history.py   # CRUD for `query_history` table
+│   │   │       └── feedback.py  # CRUD for `feedback` table
+│   │   ├── ingestion/
+│   │   │   ├── pipeline.py      # ingest_and_write() — orchestrates all loaders/chunkers
+│   │   │   ├── loaders/
+│   │   │   │   ├── filesystem.py# collect_code_files(), collect_doc_files()
+│   │   │   │   └── git.py       # ingest_commits() via GitPython
+│   │   │   ├── chunkers/
+│   │   │   │   ├── python_chunker.py # AST-aware Python chunking (ast module)
+│   │   │   │   └── javascript.py     # tree-sitter chunking for JS/TS/JSX/TSX
+│   │   │   └── parsers/
+│   │   │       └── markdown.py  # chunk_readme_file() — splits by heading
+│   │   ├── indexing/
+│   │   │   ├── pipeline.py      # build_all_indexes() — reads JSONL, embeds, saves
+│   │   │   ├── vector/
+│   │   │   │   ├── embedder.py  # Jina API or local sentence-transformers
+│   │   │   │   └── faiss.py     # FaissStore — add/search/save/load/remove_repo
+│   │   │   └── keyword/
+│   │   │       └── bm25.py      # BM25Store — build/search/save/load/remove_repo
+│   │   ├── retrieval/
+│   │   │   └── pipeline.py      # RetrievalPipeline — search_code / commits / readme
+│   │   ├── services/
+│   │   │   ├── repo_service.py  # Business logic: add/update/delete repos + index lifecycle
+│   │   │   └── chat_service.py  # Orchestrates LangGraph pipeline for a query
+│   │   └── schemas/
+│   │       ├── chat.py          # QueryRequest, QueryResponse, Citation, FeedbackRequest
+│   │       └── repo.py          # AddRepoRequest, HealthResponse
+│   ├── data/                    # Runtime data (gitignored)
+│   │   ├── raw/repos/           # Cloned GitHub repos
+│   │   ├── processed/           # JSONL chunk files
+│   │   └── indexes/             # FAISS + BM25 binary indexes
+│   └── pyproject.toml
+├── frontend/
 │   └── src/
-│       ├── App.jsx               # Dashboard UI with citation drawer
-│       └── index.css             # Custom design system
-│
-└── eval/                         # Benchmark & Evaluation Harness
-    ├── test_questions.py         # 20 ground-truth labelled evaluation questions
-    └── run_eval.py               # Deterministic evaluation runner
+│       ├── App.jsx              # Main UI (sidebar nav, query input, citations, history)
+│       ├── services/api.js      # Axios instance (dev proxy / prod Render URL)
+│       └── components/repos/
+│           ├── AddRepoModal.jsx
+│           ├── ReposView.jsx
+│           └── UpdateOverlay.jsx
+├── requirements.txt
+├── render.yaml                  # Render.com deployment blueprint
+├── runtime.txt                  # Python 3.11
+└── .env.example
 ```
 
 ---
 
-## Quick Start Guide
+## How ingestion works
 
-### 1. Requirements & Setup
+When you click **Add** or **Sync** on a repo:
+
+1. **Clone** the GitHub repo into `backend/data/raw/repos/<name>/` (depth 500)
+2. **Code chunking** — Python files use `ast.parse()` to extract functions, async functions, and class methods as individual chunks. JS/TS/JSX/TSX use tree-sitter for accurate symbol boundaries (with a regex fallback if tree-sitter is unavailable).
+3. **Commit chunking** — GitPython walks the last 500 commits (skipping merges), capturing hash, message, author, date, and changed files per commit.
+4. **README / doc chunking** — Markdown files are split at heading boundaries.
+5. All chunks are appended to JSONL files in `backend/data/processed/`.
+6. **Embedding** — chunks are sent to the Jina Embeddings API in batches of 64 (`jina-embeddings-v2-base-code`, 768-dim). Rate-limit 429 responses are retried with exponential backoff (30s → 60s → 120s).
+7. **FAISS indexing** — three separate `IndexFlatIP` indexes are built: code, commits, readme.
+8. **BM25 indexing** — a BM25Okapi index is built on code chunks with camelCase/snake_case tokenisation.
+9. **Supabase Storage upload** — all FAISS, BM25, and JSONL files are uploaded to the `kb-indexes` bucket so they survive Render restarts.
+
+On every backend **startup**, the index files are downloaded from Supabase Storage back to local disk before the server starts accepting requests.
+
+---
+
+## How retrieval works
+
+For each query:
+
+1. **Routing** — the Groq LLM reads the query and decides which repos and content types (`code`, `commits`, `readme`) to search. If the user has already selected repo filters in the UI, those are honoured and the LLM only decides content types.
+2. **Parallel retrieval** — three LangGraph nodes run simultaneously:
+   - `retrieve_code`: FAISS dense search (top-10) → BM25 rerank → top-5 chunks. Hybrid score = 60% FAISS + 40% BM25.
+   - `retrieve_commits`: FAISS dense only, top-5
+   - `retrieve_readme`: FAISS dense only, top-5
+3. **Ambiguity check** — if the top code chunks span ≥2 repos, the ambiguity flag is set and the synthesiser uses a compare-and-contrast prompt instead.
+4. **Synthesis** — the Groq LLM receives all retrieved chunks and generates an answer with explicit `repo/file:line` citations. Last 3 turns of session conversation are included for follow-up context.
+5. **Citations** — a regex parses citation markers from the answer text and merges with chunk metadata. All retrieved chunks are also included as supporting sources.
+
+---
+
+## Local development
+
+### Prerequisites
+
+- Python 3.11+
+- Node.js 18+
+- A [Groq API key](https://console.groq.com/)
+- A [Jina API key](https://jina.ai/) (free tier: 1M tokens)
+- A [Supabase project](https://supabase.com/) with the schema below
+
+### Supabase schema
+
+Run this SQL in **Supabase → SQL Editor**:
+
+```sql
+-- Repos
+create table if not exists repos (
+  id           bigint generated always as identity primary key,
+  name         text unique not null,
+  url          text,
+  last_synced  text,
+  chunk_count  int default 0,
+  created_at   timestamptz default now()
+);
+
+-- Query history
+create table if not exists query_history (
+  id               bigint generated always as identity primary key,
+  query            text not null,
+  answer           text,
+  routed_repos     text[],
+  routed_types     text[],
+  citations        jsonb,
+  latency_ms       float,
+  ambiguity_flag   boolean default false,
+  ambiguity_detail text,
+  saved            boolean default false,
+  created_at       timestamptz default now()
+);
+
+-- Feedback
+create table if not exists feedback (
+  id             bigint generated always as identity primary key,
+  query          text,
+  answer_snippet text,
+  rating         text,
+  routed_repos   text[],
+  created_at     timestamptz default now()
+);
+```
+
+### Setup
 
 ```bash
-# Clone the repository
-git clone https://github.com/Deepak-vm/Knowledge-Base-Agent.git
-cd Knowledge-Base-Agent
+# 1. Clone
+git clone https://github.com/Deepak-vm/CodeAtlas.git
+cd CodeAtlas
 
-# Create & activate a virtual environment
-python3 -m venv .venv
+# 2. Create virtual environment
+python -m venv .venv
 source .venv/bin/activate
 
-# Install dependencies
+# 3. Install backend deps
 pip install -r requirements.txt
-```
 
-### 2. Configure Environment & Repositories
+# 4. Copy and fill in env vars
+cp .env.example .env
+# Edit .env with your keys
 
-Create a `.env` file in the root directory:
-```env
-GROQ_API_KEY=gsk_your_groq_api_key
-LANGCHAIN_TRACING_V2=true
-LANGCHAIN_API_KEY=lsv2_your_langsmith_key
-LANGCHAIN_PROJECT=Knowledge-Base-Agent
-```
+# 5. Start backend
+uvicorn backend.app.main:app --reload --port 8000
 
-Create `repos.json` specifying local paths or GitHub URLs to index:
-```json
-[
-  {
-    "name": "my-backend",
-    "path": "/path/to/your/backend"
-  },
-  {
-    "name": "my-rag-agent",
-    "url": "https://github.com/username/my-rag-agent"
-  }
-]
-```
-
-> **Note:** Repositories specified by URL are cloned automatically into `repos/` on first ingestion.
-
-### 3. Ingestion & Indexing Workflow
-
-```bash
-# Step 1: Ingest code, commits, and docs for all repos in repos.json
-python -m ingestion.run_ingestion
-
-# Step 2: Generate embeddings & build FAISS + BM25 indexes
-python -m indexing.build_indexes
-```
-
-To re-ingest a single repo without touching others:
-```bash
-python -m ingestion.run_ingestion --only-repo my-rag-agent
-```
-
-To start fresh and wipe existing chunk files before ingesting:
-```bash
-python -m ingestion.run_ingestion --fresh
-```
-
-### 4. Running the Agent
-
-#### Option A: Command Line Interface (CLI)
-```bash
-python -m agents.graph "where have I implemented WebSocket real-time features?"
-```
-
-#### Option B: FastAPI Backend + React Web Interface
-```bash
-# Terminal 1: Start FastAPI server (Port 8000)
-uvicorn api.main:app --reload --port 8000
-
-# Terminal 2: Start React Frontend (Port 5173)
+# 6. In a separate terminal — start frontend
 cd frontend
 npm install
 npm run dev
+# Opens at http://localhost:5173
 ```
-Open `http://localhost:5173` in your browser.
+
+The frontend dev server proxies `/query`, `/repos`, `/history` etc. to `localhost:8000` via the Vite config.
 
 ---
 
-## Evaluation & Benchmarking
+## Environment variables
 
-The evaluation suite runs 20 ground-truth labelled queries through the full LangGraph pipeline and measures performance against exact repo and file targets.
-
-```bash
-# Run all 20 questions
-python -m eval.run_eval
-
-# Pin to a specific repo set for reproducible runs (recommended)
-python -m eval.run_eval --repos "LearnSphere,SketchXPad,MultiSource-RAG-Agent"
-
-# Run a subset of questions by ID
-python -m eval.run_eval --questions 1,2,5
-
-# Save results to JSON for further analysis
-python -m eval.run_eval --output results.json
-
-# Print retrieved file paths and answer snippets
-python -m eval.run_eval --verbose
-```
-
-### Measured Metrics
-
-| Metric | What It Tests |
-|---|---|
-| **Repo hit rate** | Expected repository name found in retrieved chunks or citations |
-| **File hit rate** | Expected file substring found in retrieved chunks or citations (commit chunks also checked via `changed_files`) |
-| **Answer quality** | Non-empty, grounded response; negative/hallucination tests checked for correct refusal |
-| **Ambiguity detection** | Ambiguity flag raised correctly for genuine conflicting-implementation cross-repo queries (distinct from broad multi-repo queries) |
-| **Avg latency** | End-to-end pipeline time per query |
-
-### Scoring Design
-
-- **Negative tests** (`expected_repo == "NONE"`, e.g. the Kubernetes deployment query) are excluded from repo-hit and file-hit denominators entirely — they only count toward answer quality (did the system correctly refuse?).
-- **Ambiguity detection** is scored only for questions tagged `is_ambiguity_test = True` — genuine conflicting-implementation cases (e.g. JWT auth implemented differently across repos). Broad multi-repo README queries are not counted.
-- A **file-hit miss table** is printed at the end of every run showing retrieved filenames vs. expected, enabling quick triage of ranking failures vs. coverage gaps.
-
-### Current Benchmark Results (20-question suite)
-
-| Metric | Score |
-|---|---|
-| Repo hit rate | 89% (17/19) |
-| File hit rate | 57% (11/19) — *being actively improved* |
-| Answer quality | 100% (20/20) |
-| Ambiguity detection | 66% (2/3) |
-| Avg latency | ~11 s |
-
-> File-hit misses were traced to eval/debug scripts committed inside target repos competing with implementation files in retrieval. Fixed by excluding `eval/` directories and root-level check scripts from the code index via `SKIP_DIRS` and `SKIP_FILENAMES` in `config.py`.
+| Variable | Required | Description |
+|:---|:---|:---|
+| `GROQ_API_KEY` | ✅ | Groq API key for LLM inference |
+| `JINA_API_KEY` | ✅ | Jina API key for embeddings |
+| `USE_JINA_API` | ✅ | Set `true` in production (skips local model download) |
+| `SUPABASE_URL` | ✅ | `https://<project>.supabase.co` |
+| `SUPABASE_SERVICE_KEY` | ✅ | Supabase `service_role` key (from Project Settings → API) |
+| `FRONTEND_URL` | recommended | Your Vercel URL — added to CORS allow-list |
+| `LANGCHAIN_API_KEY` | optional | LangSmith tracing |
+| `LANGCHAIN_TRACING_V2` | optional | Set `true` to enable tracing |
 
 ---
 
-## Known Limitations
+## Deployment
 
-- Tree-sitter chunking is scoped to a small set of languages; other file types fall back to regex-based declaration parsing, which is less precise at handling nested structures.
-- Conversation memory is session-only and does not persist across page refreshes.
-- Evaluation set contains 20 questions benchmarked against 3 target repositories — results demonstrate the architecture, not large-scale production performance.
-- Incremental re-indexing on commit push (webhook-triggered) is designed but not yet implemented; current updates require a manual per-repo re-ingestion step.
-- Groq's free-tier token-per-minute cap (12k TPM) limits continuous eval throughput; the eval runner adds a 5-second inter-query pause to avoid 429 errors.
+### Backend — Render (free tier)
+
+1. Push to GitHub.
+2. Create a new **Web Service** on Render, connected to your repo.
+3. Set **Start Command** to:
+   ```
+   uvicorn backend.app.main:app --host 0.0.0.0 --port $PORT
+   ```
+4. Add all environment variables in **Render → Environment**.
+5. The `render.yaml` in the repo configures the service blueprint.
+
+> **No persistent disk needed.** Index files are stored in Supabase Storage bucket `kb-indexes` and restored on every startup.
+
+### Frontend — Vercel
+
+1. Import the repo to Vercel.
+2. Set **Root Directory** to `frontend`.
+3. Add the env var `VITE_API_BASE_URL=https://your-render-url.onrender.com`.
+4. Deploy.
+
+---
+
+## API reference
+
+All routes are available at both `/api/v1/<route>` and `/<route>` (legacy, for backward compatibility).
+
+| Method | Route | Description |
+|:---|:---|:---|
+| `POST` | `/query` | Run the RAG pipeline. Body: `{ query, repos?, conversation_history? }` |
+| `GET` | `/history` | Fetch query history from Supabase (newest first) |
+| `POST` | `/history/{id}/save` | Toggle bookmark on a history item |
+| `DELETE` | `/history/{id}` | Delete one history item |
+| `POST` | `/history/bulk-delete` | Delete multiple items by ID list |
+| `POST` | `/feedback` | Submit thumbs up/down rating |
+| `GET` | `/repos` | List configured repos with chunk counts |
+| `POST` | `/repos/add` | Add a repo (triggers clone + ingestion + indexing) |
+| `DELETE` | `/repos/{name}` | Remove a repo and its index data |
+| `POST` | `/repos/{name}/update` | Re-ingest and re-index a repo |
+| `GET` | `/health` | Index status + configured repo names |
+| `GET` | `/debug/disk` | Disk usage + local index file existence |
+| `GET` | `/debug/storage` | Supabase Storage bucket status + local status |
+
+Interactive API docs: [codeatlas-zyys.onrender.com/docs](https://codeatlas-zyys.onrender.com/docs)
+
+---
+
+## Supported languages
+
+| Language | Chunking strategy |
+|:---|:---|
+| Python (`.py`) | AST — functions, async functions, class methods |
+| JavaScript (`.js`, `.jsx`) | tree-sitter — function declarations, arrow functions, class declarations, React components |
+| TypeScript (`.ts`, `.tsx`) | tree-sitter — same as JS |
+| Markdown / README | Heading-based section splitting |
+| Git commits | One chunk per commit (hash, message, author, date, files) |
+| Other languages (`.go`, `.java`, `.rs`, `.cpp`, `.c`, `.h`) | Sliding window fallback |
+
+---
+
+## Known limitations
+
+- **Render free plan cold starts** — the first request after inactivity can take 30–60 seconds while the service wakes up and downloads indexes from Supabase Storage.
+- **Jina rate limits** — the free Jina tier has token-per-minute limits. Indexing large repos back-to-back may hit 429 errors (the embedder retries with exponential backoff: 30s, 60s, 120s). Index repos one at a time to avoid this.
+- **Groq model availability** — available models depend on your Groq account tier. The active models are configured in `backend/app/core/config.py`.
+- **No authentication** — query history is shared across all sessions. This is by design for a personal knowledge base, but not suitable for multi-user production use.
 
